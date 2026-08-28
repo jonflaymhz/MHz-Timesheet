@@ -1,5 +1,6 @@
 require('dotenv').config();
 require('express-async-errors');
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
@@ -28,6 +29,12 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/team', teamRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+
+if (process.env.NODE_ENV === 'production') {
+  const frontendDist = path.join(__dirname, '../frontend-dist');
+  app.use(express.static(frontendDist));
+  app.get('*', (req, res) => res.sendFile(path.join(frontendDist, 'index.html')));
+}
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {

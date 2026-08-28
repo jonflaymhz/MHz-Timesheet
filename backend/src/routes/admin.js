@@ -131,10 +131,23 @@ router.post('/projects/:id/reopen', requireAuth, requireAdmin, async (req, res) 
   res.json({ message: `${result.rows[0].qw_project_number} reopened` });
 });
 
-// ── Category visibility (Section 8) — read-only, with last-synced ──
+// ── Cost codes (Section 8) ──────────────────────────────────────
+// Rates don't need to come from QW (confirmed) — admin sets/maintains them
+// directly here instead of relying on the rate_code sync match.
 router.get('/cost-codes', requireAuth, requireAdmin, async (req, res) => {
   const result = await db.query(`SELECT * FROM cost_code ORDER BY department, code`);
   res.json(result.rows);
+});
+
+router.patch('/cost-codes/:id', requireAuth, requireAdmin, async (req, res) => {
+  const { current_rate, is_active } = req.body;
+  const result = await db.query(
+    `UPDATE cost_code SET current_rate = COALESCE($2, current_rate), is_active = COALESCE($3, is_active)
+      WHERE id = $1 RETURNING *`,
+    [req.params.id, current_rate, is_active]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Cost code not found' });
+  res.json(result.rows[0]);
 });
 
 // ── Override tools: Correct / Unsubmit (Section 5, Jonny/admin only) ──

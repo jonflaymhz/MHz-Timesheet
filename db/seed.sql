@@ -20,13 +20,19 @@ INSERT INTO non_project_reason (name) VALUES
   ('Support'), ('Tea-break'), ('Training'), ('Unpaid Leave'), ('Warranty')
 ON CONFLICT (name) DO NOTHING;
 
+-- Departments confirmed by Jon: CL = Coachbuild labour, IL = Installation
+-- (wiring), WW = Woodwork, EL = Engineering, PM = Project Management (this
+-- last one also already exists informally in QW's own kickoff labour
+-- budget categories — see ops.labour_budget).
+--
 -- Department-admin codes (Section 13 item 2) — the default cost code for a
 -- non-project entry, matched to the entering user's own department.
 INSERT INTO cost_code (code, description, department) VALUES
   ('CL-AD', 'Coachbuilding — Department Admin', 'CL'),
   ('EL-AD', 'Engineering — Department Admin', 'EL'),
   ('IL-AD', 'Wiring — Department Admin', 'IL'),
-  ('WW-AD', 'Woodwork — Department Admin', 'WW')
+  ('WW-AD', 'Woodwork — Department Admin', 'WW'),
+  ('PM-AD', 'Project Management — Department Admin', 'PM')
 ON CONFLICT (code) DO NOTHING;
 
 -- Project-specific warranty codes (Section 9) — distinct from the
