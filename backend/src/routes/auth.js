@@ -8,14 +8,20 @@ const { requireAuth, COOKIE_NAME } = require('../middleware/auth');
 
 const router = express.Router();
 
-const COOKIE_OPTS = {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'lax',
-};
-
-function setSessionCookie(res, token, expiresAt) {
-  res.cookie(COOKIE_NAME, token, { ...COOKIE_OPTS, expires: expiresAt });
+// Secure is decided per-request from whether the connection is actually
+// HTTPS, not from NODE_ENV — this app is temporarily served over plain
+// HTTP (no cert yet; see deployment notes), and a Secure cookie is
+// silently dropped by the browser over HTTP, which would make login look
+// like it succeeds while no session actually persists. Once a real
+// certificate is in place this becomes correct automatically, no env var
+// to remember to flip.
+function setSessionCookie(req, res, token, expiresAt) {
+  res.cookie(COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: req.secure,
+    sameSite: 'lax',
+    expires: expiresAt,
+  });
 }
 
 // ── GET /api/auth/kiosk-users ─────────────────────────────────
@@ -62,7 +68,7 @@ router.post('/login', async (req, res) => {
     deviceLabel: device_label || null,
     isKiosk: !!is_kiosk,
   });
-  setSessionCookie(res, token, expiresAt);
+  setSessionCookie(req, res, token, expiresAt);
   res.json({ id: user.id, full_name: user.full_name, role: user.role });
 });
 
@@ -94,7 +100,7 @@ router.post('/admin-login', async (req, res) => {
     return res.status(401).json({ error: 'Invalid authenticator code' });
   }
   const { token, expiresAt } = await createSession(user.id, { deviceLabel: req.body.device_label, elevated: true });
-  setSessionCookie(res, token, expiresAt);
+  setSessionCookie(req, res, token, expiresAt);
   res.json({ id: user.id, full_name: user.full_name, role: user.role });
 });
 

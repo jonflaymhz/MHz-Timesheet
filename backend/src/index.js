@@ -1,6 +1,8 @@
 require('dotenv').config();
 require('express-async-errors');
 const path = require('path');
+const fs = require('fs');
+const https = require('https');
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
@@ -16,7 +18,7 @@ const { runHourlySync } = require('./services/qwPull');
 const app = express();
 
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' ? 'https://timesheet.mhz.limited' : true,
+  origin: process.env.NODE_ENV === 'production' ? 'https://timesheet.mhz.limited:3003' : true,
   credentials: true,
 }));
 app.use(express.json());
@@ -43,8 +45,17 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3003;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Megahertz Timesheet API running on port ${PORT} [${process.env.NODE_ENV}]`);
+
+// TLS terminated directly in Node (cert via certbot --manual DNS-01,
+// same pattern as QW's own app.mhz.limited — see db/ for the renewal
+// note: this is a --manual cert, so it does NOT auto-renew; repeat the
+// same certbot command before 2026-11-26).
+const httpsOptions = {
+  cert: fs.readFileSync('/etc/letsencrypt/live/timesheet.mhz.limited/fullchain.pem'),
+  key: fs.readFileSync('/etc/letsencrypt/live/timesheet.mhz.limited/privkey.pem'),
+};
+https.createServer(httpsOptions, app).listen(PORT, '0.0.0.0', () => {
+  console.log(`Megahertz Timesheet API running on port ${PORT} [${process.env.NODE_ENV}, HTTPS]`);
 });
 
 // Hourly pull (Section 2, decided) — projects and cost-code rates from QW.
