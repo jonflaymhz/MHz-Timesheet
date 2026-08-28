@@ -91,8 +91,14 @@ export default function LoginPage() {
       </form>
       <div style={{ textAlign: 'center', marginTop: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
         {!kioskMode && <button className="btn btn-ghost btn-sm" onClick={() => setKioskMode(true)}>Use shared factory kiosk instead</button>}
-        <Link to="/admin-login" style={{ fontSize: 13, color: 'var(--text3)' }}>Admin / Jonny sign-in</Link>
       </div>
+      {/* Deliberately a full, ordinary button here, not a small muted link —
+          an easy-to-miss link at this spot caused real confusion in
+          practice: people typed their admin password/authenticator code
+          into the PIN box above instead of finding this. */}
+      <Link to="/admin-login" className="btn btn-ghost" style={{ width: '100%', marginTop: 16, textAlign: 'center' }}>
+        Admin or Jonny? Sign in here instead →
+      </Link>
     </div>
   )
 }
