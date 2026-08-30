@@ -7,6 +7,7 @@ const TABS = [
   { key: 'users', label: 'Users' },
   { key: 'projects', label: 'Projects' },
   { key: 'costcodes', label: 'Cost codes' },
+  { key: 'ctp', label: 'CTP builds' },
   { key: 'overrides', label: 'Overrides' },
   { key: 'audit', label: 'Audit log' },
   { key: 'outstanding', label: 'Outstanding' },
@@ -23,7 +24,7 @@ export default function AdminPage() {
   const { user } = useAuth()
   const [tab, setTab] = useState('users')
   const isAdmin = isSystemAdmin(user)
-  const visibleTabs = TABS.filter(t => isAdmin || !['users', 'costcodes'].includes(t.key))
+  const visibleTabs = TABS.filter(t => isAdmin || !['users', 'costcodes', 'ctp'].includes(t.key))
 
   return (
     <div>
@@ -36,6 +37,7 @@ export default function AdminPage() {
         {tab === 'users' && isAdmin && <UsersTab />}
         {tab === 'projects' && <ProjectsTab />}
         {tab === 'costcodes' && isAdmin && <CostCodesTab />}
+        {tab === 'ctp' && isAdmin && <CtpBuildsTab />}
         {tab === 'overrides' && <OverridesTab />}
         {tab === 'audit' && <AuditTab />}
         {tab === 'outstanding' && <OutstandingTab />}
@@ -368,15 +370,22 @@ function EditUserModal({ user, onClose, onSaved, users }) {
 }
 
 // ── Projects (availability) ─────────────────────────────────────
+// Two independent controls (Admin Scope Section 6): Open/Closed mirrors
+// whether QW itself considers the project live; "Timesheet" is the
+// separate Stage 1 global switch that must be deliberately turned on
+// before anyone can log to it at all, even an already-open project.
 function ProjectsTab() {
   const [projects, setProjects] = useState([])
   const [q, setQ] = useState('')
+  const [managingVisibility, setManagingVisibility] = useState(null) // project row
 
   function load() { api.get(`/admin/projects${q ? `?q=${q}` : ''}`).then(setProjects).catch(() => {}) }
   useEffect(load, [q])
 
   async function close(id) { await api.post(`/admin/projects/${id}/close`); load() }
   async function reopen(id) { await api.post(`/admin/projects/${id}/reopen`); load() }
+  async function enableTimesheet(id) { await api.post(`/admin/projects/${id}/enable-timesheet`); load() }
+  async function disableTimesheet(id) { await api.post(`/admin/projects/${id}/disable-timesheet`); load() }
 
   return (
     <div>
@@ -384,21 +393,150 @@ function ProjectsTab() {
       <input className="input" placeholder="Search…" value={q} onChange={e => setQ(e.target.value)} style={{ marginBottom: 14, maxWidth: 320 }} />
       <div className="card">
         {projects.map(p => (
-          <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+          <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap', gap: 10 }}>
             <div>
               <div style={{ fontWeight: 600 }}>{p.project_name}</div>
               <div style={{ fontSize: 12, color: 'var(--text3)' }}>QW status: {p.qw_status} · synced {new Date(p.last_synced_at).toLocaleString('en-GB')}</div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
               <span className="tag" style={{ background: p.effective_open ? 'var(--status-good-bg)' : 'var(--status-bad-bg)', color: p.effective_open ? 'var(--status-good-text)' : 'var(--status-bad-text)' }}>
                 {p.effective_open ? 'Open' : 'Closed'}
               </span>
               {p.effective_open
                 ? <button className="btn btn-danger btn-sm" onClick={() => close(p.id)}>Close</button>
                 : <button className="btn btn-ghost btn-sm" onClick={() => reopen(p.id)}>Reopen</button>}
+              <span className="tag" style={{ background: p.timesheet_enabled ? 'var(--status-good-bg)' : 'var(--bg3)', color: p.timesheet_enabled ? 'var(--status-good-text)' : 'var(--text3)' }}>
+                {p.timesheet_enabled ? 'Timesheet: on' : 'Timesheet: off'}
+              </span>
+              {p.timesheet_enabled
+                ? <button className="btn btn-danger btn-sm" onClick={() => disableTimesheet(p.id)}>Turn off</button>
+                : <button className="btn btn-primary btn-sm" onClick={() => enableTimesheet(p.id)}>Turn on</button>}
+              <button className="btn btn-ghost btn-sm" onClick={() => setManagingVisibility(p)}>Visibility</button>
             </div>
           </div>
         ))}
+        {projects.length === 0 && <div style={{ padding: 16, color: 'var(--text3)' }}>No projects match.</div>}
+      </div>
+      {managingVisibility && (
+        <ProjectVisibilityModal project={managingVisibility} onClose={() => setManagingVisibility(null)} />
+      )}
+    </div>
+  )
+}
+
+// Per-project visibility list (Section 6.2) — only contractors need
+// adding here; an employee is visible by default once a project's
+// Timesheet switch is on.
+function ProjectVisibilityModal({ project, onClose }) {
+  const [granted, setGranted] = useState([])
+  const [contractors, setContractors] = useState([])
+  const [addId, setAddId] = useState('')
+  const [error, setError] = useState('')
+
+  function load() {
+    api.get(`/admin/projects/${project.id}/visibility`).then(setGranted).catch(e => setError(e.message))
+  }
+  useEffect(() => {
+    load()
+    api.get('/admin/users?employment_type=contractor&status=active').then(setContractors).catch(() => {})
+  }, [])
+
+  async function add() {
+    if (!addId) return
+    try {
+      await api.post(`/admin/projects/${project.id}/visibility`, { user_id: addId })
+      setAddId(''); load()
+    } catch (err) { setError(err.message) }
+  }
+  async function remove(userId) {
+    await api.delete(`/admin/projects/${project.id}/visibility/${userId}`).catch(e => setError(e.message))
+    load()
+  }
+
+  const addableContractors = contractors.filter(c => !granted.some(g => g.id === c.id))
+
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal">
+        <h2 style={{ fontSize: 18, marginBottom: 4 }}>Visibility — {project.project_name}</h2>
+        <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 14 }}>
+          Contractors added here can see and log to this project. Employees always can, once Timesheet is on.
+        </div>
+        {error && <div className="banner banner-error">{error}</div>}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+          <select className="input" value={addId} onChange={e => setAddId(e.target.value)}>
+            <option value="">Add a contractor…</option>
+            {addableContractors.map(c => <option key={c.id} value={c.id}>{c.full_name}</option>)}
+          </select>
+          <button className="btn btn-primary btn-sm" onClick={add} disabled={!addId}>Add</button>
+        </div>
+        <div className="card">
+          {granted.map(g => (
+            <div key={g.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderBottom: '1px solid var(--border)' }}>
+              <span>{g.full_name}</span>
+              <button className="btn btn-ghost btn-sm" onClick={() => remove(g.id)}>Remove</button>
+            </div>
+          ))}
+          {granted.length === 0 && <div style={{ padding: 14, color: 'var(--text3)' }}>No contractors added yet.</div>}
+        </div>
+        <button className="btn btn-ghost" style={{ width: '100%', marginTop: 16 }} onClick={onClose}>Close</button>
+      </div>
+    </div>
+  )
+}
+
+// ── CTP device/build tracking (Section 7) ────────────────────────
+function CtpBuildsTab() {
+  const [builds, setBuilds] = useState([])
+  const [report, setReport] = useState([])
+  const [newName, setNewName] = useState('')
+  const [error, setError] = useState('')
+
+  function load() {
+    api.get('/admin/ctp-builds').then(setBuilds).catch(e => setError(e.message))
+    api.get('/admin/reports/ctp-hours').then(setReport).catch(() => {})
+  }
+  useEffect(load, [])
+
+  async function add() {
+    if (!newName.trim()) return
+    try {
+      await api.post('/admin/ctp-builds', { name: newName.trim() })
+      setNewName(''); load()
+    } catch (err) { setError(err.message) }
+  }
+  async function toggleActive(b) {
+    await api.patch(`/admin/ctp-builds/${b.id}`, { is_active: !b.is_active }).catch(e => setError(e.message))
+    load()
+  }
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, marginBottom: 14 }}>CTP device/build types</h2>
+      {error && <div className="banner banner-error">{error}</div>}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <input className="input" placeholder="New build/device type name…" value={newName} onChange={e => setNewName(e.target.value)} style={{ maxWidth: 320 }} />
+        <button className="btn btn-primary btn-sm" onClick={add} disabled={!newName.trim()}>Add</button>
+      </div>
+      <div className="card" style={{ marginBottom: 24 }}>
+        {builds.map(b => (
+          <div key={b.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border)' }}>
+            <span style={{ opacity: b.is_active ? 1 : 0.5 }}>{b.name}</span>
+            <button className="btn btn-ghost btn-sm" onClick={() => toggleActive(b)}>{b.is_active ? 'Deactivate' : 'Reactivate'}</button>
+          </div>
+        ))}
+        {builds.length === 0 && <div style={{ padding: 16, color: 'var(--text3)' }}>No build types yet.</div>}
+      </div>
+
+      <h2 style={{ fontSize: 17, marginBottom: 14 }}>Hours by build type</h2>
+      <div className="card">
+        {report.map(r => (
+          <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border)' }}>
+            <span style={{ opacity: r.is_active ? 1 : 0.5 }}>{r.name}{!r.is_active && ' (inactive)'}</span>
+            <span style={{ fontWeight: 600 }}>{Number(r.total_hours)} hrs</span>
+          </div>
+        ))}
+        {report.length === 0 && <div style={{ padding: 16, color: 'var(--text3)' }}>No CTP time logged yet.</div>}
       </div>
     </div>
   )

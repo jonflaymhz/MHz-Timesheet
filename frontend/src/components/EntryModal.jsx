@@ -17,6 +17,8 @@ export default function EntryModal({ weekId, date, department, onClose, onSaved 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
+  const isCtpBuild = selection?.type === 'ctpBuild'
+
   useEffect(() => {
     if (selection?.type === 'reason') {
       api.get(`/reference/cost-codes${department ? `?department=${department}` : ''}`)
@@ -28,19 +30,24 @@ export default function EntryModal({ weekId, date, department, onClose, onSaved 
         .catch(() => {})
     } else if (selection?.type === 'project') {
       api.get('/reference/cost-codes').then(setCostCodes).catch(() => {})
+    } else if (isCtpBuild) {
+      // A CTP entry has no cost code at all (Section 7) — CTP staff aren't
+      // in any of the catalogue's five departments.
+      setCostCodes([]); setCostCodeId('')
     }
-  }, [selection, department])
+  }, [selection, department, isCtpBuild])
 
   async function save() {
-    if (!selection) { setError('Pick a project or a reason'); return }
-    if (!costCodeId) { setError('Pick a cost code'); return }
+    if (!selection) { setError('Pick a project, a reason, or a CTP build'); return }
+    if (!isCtpBuild && !costCodeId) { setError('Pick a cost code'); return }
     setSaving(true); setError('')
     try {
       await api.post(`/weeks/${weekId}/entries`, {
         entry_date: date,
         project_ref_id: selection.type === 'project' ? selection.id : null,
         reason_id: selection.type === 'reason' ? selection.id : null,
-        cost_code_id: costCodeId,
+        ctp_build_id: isCtpBuild ? selection.id : null,
+        cost_code_id: isCtpBuild ? null : costCodeId,
         hours,
         description: description.trim() || null,
       })
@@ -63,19 +70,23 @@ export default function EntryModal({ weekId, date, department, onClose, onSaved 
 
         {error && <div className="banner banner-error">{error}</div>}
 
-        <ProjectReasonPicker value={selection} onSelect={setSelection} />
+        <ProjectReasonPicker value={selection} onSelect={setSelection} showCtpBuilds={department === 'CTP'} />
 
         {selection && (
           <>
-            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '16px 0 8px' }}>
-              Cost code
-            </div>
-            <select className="input" value={costCodeId} onChange={e => setCostCodeId(e.target.value)} style={{ marginBottom: 16 }}>
-              <option value="">Select…</option>
-              {costCodes.map(c => <option key={c.id} value={c.id}>{c.code} — {c.description}</option>)}
-            </select>
+            {!isCtpBuild && (
+              <>
+                <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '16px 0 8px' }}>
+                  Cost code
+                </div>
+                <select className="input" value={costCodeId} onChange={e => setCostCodeId(e.target.value)} style={{ marginBottom: 16 }}>
+                  <option value="">Select…</option>
+                  {costCodes.map(c => <option key={c.id} value={c.id}>{c.code} — {c.description}</option>)}
+                </select>
+              </>
+            )}
 
-            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8, marginTop: isCtpBuild ? 16 : 0 }}>
               Hours
             </div>
             <HourPicker value={hours} onChange={setHours} />

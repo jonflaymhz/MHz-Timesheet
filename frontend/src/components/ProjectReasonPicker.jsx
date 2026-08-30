@@ -2,11 +2,15 @@ import { useState, useEffect } from 'react'
 import { api } from '../lib/api.js'
 
 // Shows 3-4 recently-used projects by default, a search box to narrow the
-// full list, and non-project reasons as a separate, always-visible group
-// (Section 6) — avoids scrolling ~20 projects for "same job as yesterday".
-export default function ProjectReasonPicker({ value, onSelect }) {
+// full list, non-project reasons as a separate, always-visible group
+// (Section 6), and — for CTP staff only — a CTP device/build group
+// (Admin Scope Section 7). showCtpBuilds is keyed off the entry's owner
+// department, not the logged-in viewer's, so a supervisor proxy-entering
+// for a CTP contractor still sees it.
+export default function ProjectReasonPicker({ value, onSelect, showCtpBuilds }) {
   const [recent, setRecent] = useState([])
   const [reasons, setReasons] = useState([])
+  const [ctpBuilds, setCtpBuilds] = useState([])
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState(null)
   const [showAll, setShowAll] = useState(false)
@@ -15,7 +19,8 @@ export default function ProjectReasonPicker({ value, onSelect }) {
   useEffect(() => {
     api.get('/reference/projects?recent=1').then(setRecent).catch(() => {})
     api.get('/reference/non-project-reasons').then(setReasons).catch(() => {})
-  }, [])
+    if (showCtpBuilds) api.get('/reference/ctp-builds').then(setCtpBuilds).catch(() => {})
+  }, [showCtpBuilds])
 
   useEffect(() => {
     if (search.trim().length < 2) { setSearchResults(null); return }
@@ -78,6 +83,29 @@ export default function ProjectReasonPicker({ value, onSelect }) {
           </button>
         ))}
       </div>
+
+      {showCtpBuilds && ctpBuilds.length > 0 && (
+        <>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '14px 0 8px' }}>
+            CTP build
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {ctpBuilds.map(b => (
+              <button
+                key={b.id}
+                className="btn btn-sm"
+                style={{
+                  background: value?.type === 'ctpBuild' && value.id === b.id ? 'var(--accent)' : 'var(--bg3)',
+                  color: value?.type === 'ctpBuild' && value.id === b.id ? '#fff' : 'var(--text)',
+                }}
+                onClick={() => onSelect({ type: 'ctpBuild', id: b.id, label: b.name })}
+              >
+                {b.name}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   )
 }

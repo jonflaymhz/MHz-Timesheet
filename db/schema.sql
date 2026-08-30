@@ -1,8 +1,8 @@
 -- ============================================================
--- Megahertz Timesheet System — Database Schema v1.3
+-- Megahertz Timesheet System — Database Schema v1.4
 -- Separate database: mhz_timesheet
 -- Reference: MHz_Timesheet_Scope_v1_0.md (Section 13 revision),
--- MHz_Timesheet_Admin_Scope_v1_0.md (admin/management batch 1)
+-- MHz_Timesheet_Admin_Scope_v1_0.md (admin/management batches 1-2)
 -- v1.3 changelog vs v1.2: users.role enum replaced by independent
 -- capability flags (can_approve/is_payroll_admin/is_system_admin)
 -- so a person can hold more than one; users.removed_at added as a
@@ -11,6 +11,18 @@
 -- audit_action values for reset-pin/reset-password/reset-mfa/
 -- freeze/unfreeze/remove/restore/update/mfa-enrolled; user_sessions
 -- gained pending_mfa_enrollment for the enrollment-in-progress state.
+-- v1.4 changelog vs v1.3 (Admin Scope Batch 2 — Section 6/7):
+-- project_ref.timesheet_enabled added (Stage 1 global switch, defaults
+-- FALSE for newly-synced projects — the 4 already-live projects were
+-- grandfathered to TRUE by migration 002, not by this file); new
+-- project_visibility table (Stage 2 per-project list); new
+-- ctp_build_type table and timesheet_entry.ctp_build_id (Section 7,
+-- aggregate by build/device type, not serial-level); timesheet_entry's
+-- CHECK and duplicate-prevention index widened to a three-way
+-- project/reason/ctp_build shape, cost_code_id now optional (NULL) for a
+-- CTP entry since no CTP department exists in the 58-code catalogue; new
+-- audit_action values for enable/disable-project-timesheet and
+-- add/remove-project-visibility.
 -- ============================================================
 -- This database is standalone. No foreign keys, views, or
 -- cross-database queries into mhz_quoting. The only connection
@@ -31,7 +43,9 @@ CREATE TYPE week_status AS ENUM ('draft', 'submitted', 'approved', 'rejected');
 CREATE TYPE audit_action AS ENUM (
     'correct', 'unsubmit', 'approve', 'reject', 'close_project', 'reopen_project', 'unlock_pin',
     'reset_pin', 'reset_password', 'reset_mfa', 'mfa_enrolled',
-    'freeze_user', 'unfreeze_user', 'remove_user', 'restore_user', 'update_user'
+    'freeze_user', 'unfreeze_user', 'remove_user', 'restore_user', 'update_user',
+    'enable_project_timesheet', 'disable_project_timesheet',
+    'add_project_visibility', 'remove_project_visibility'
 );
 
 -- ------------------------------------------------------------
@@ -137,15 +151,25 @@ CREATE TABLE project_ref (
     qw_status           TEXT NOT NULL,          -- status as received from QW ('active'/'pre_kickoff'/'closed')
     is_open              BOOLEAN NOT NULL,       -- derived: (qw_status = 'active')
     admin_override        BOOLEAN,                -- NULL = no override; TRUE = force open; FALSE = force closed (Section 7)
+    -- Stage 1 global switch (Admin Scope Section 6.1) — independent of
+    -- is_open/admin_override above, which track whether QW itself
+    -- considers the project live. This tracks whether a System admin has
+    -- deliberately opened it for TIME BOOKING; every newly-synced project
+    -- starts FALSE (qwPull.js's INSERT never names this column, so it
+    -- always takes the DEFAULT — and the ON CONFLICT UPDATE never touches
+    -- it either, so re-syncing never resets an admin's choice).
+    timesheet_enabled     BOOLEAN NOT NULL DEFAULT FALSE,
     last_synced_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_project_ref_open ON project_ref(is_open);
 CREATE INDEX idx_project_ref_number ON project_ref(qw_project_number);
 
--- Effective bookable status = admin_override if set, else is_open.
--- Application layer resolves this; kept simple here rather than
--- as a generated column to avoid re-deriving on every sync write.
+-- Effective bookable status = admin_override if set, else is_open, AND
+-- timesheet_enabled, AND (Section 6.2) the requesting person is either an
+-- employee or explicitly listed in project_visibility. Application layer
+-- resolves this; kept simple here rather than as a generated column to
+-- avoid re-deriving on every sync write.
 --
 -- Close/Reopen (Section 7) are both logged to audit_log below
 -- (entity_type='project_ref', action_type='close_project'/
@@ -154,6 +178,44 @@ CREATE INDEX idx_project_ref_number ON project_ref(qw_project_number);
 -- the actual source-of-truth action is QW's own
 -- PATCH /ops/projects/:id/status (patch v0.99.9), which is what a
 -- PM/admin uses to close a project for real. Never automatic.
+--
+-- Enable/Disable-for-timesheet (Admin Scope Section 6.1, System admin
+-- only) are a separate pair of actions from Close/Reopen above, logged as
+-- 'enable_project_timesheet'/'disable_project_timesheet'.
+
+-- ------------------------------------------------------------
+-- Project visibility (Admin Scope Section 6.2) — Stage 2 per-project
+-- list. A row is the grant; there's no separate is_active flag, removing
+-- the row revokes it. Only meaningful for a contractor: an employee is
+-- always visible once a project is globally enabled (Section 6.2's stated
+-- default), so this table is never consulted for one in practice — an
+-- employee row here would just be redundant, not wrong.
+-- ------------------------------------------------------------
+CREATE TABLE project_visibility (
+    project_ref_id  UUID NOT NULL REFERENCES project_ref(id) ON DELETE CASCADE,
+    user_id         UUID NOT NULL REFERENCES users(id),
+    added_by        UUID NOT NULL REFERENCES users(id),
+    added_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_ref_id, user_id)
+);
+
+CREATE INDEX idx_project_visibility_user ON project_visibility(user_id);
+
+-- ------------------------------------------------------------
+-- CTP device/build tracking (Admin Scope Section 7) — lightweight,
+-- admin-managed list living entirely in this app: no QW involvement, no
+-- SY project number, no rate/costing. Aggregate by build/device type, not
+-- serial-level (Section 9 open question) — the stated purpose is cost
+-- data to inform CTP pricing, which this granularity already serves;
+-- serial-level tracking could be added later as an optional column on
+-- timesheet_entry without touching this table.
+-- ------------------------------------------------------------
+CREATE TABLE ctp_build_type (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL UNIQUE,
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- ------------------------------------------------------------
 -- Cost codes (synced hourly from QW — pull side, Section 2/13)
@@ -226,10 +288,14 @@ CREATE INDEX idx_week_start_date ON timesheet_week(week_start_date);
 --
 -- Every real entry needs BOTH of (Section 13 item 2, confirmed):
 --   1. "Project/reason" — a project (project_ref_id) OR one of the
---      18 non-project reasons (reason_id). Exactly one, never both.
---   2. "Cost code" (cost_code_id) — always required, even for a
---      non-project entry, so time still lands against a department
---      for reporting (e.g. Holiday + IL-AD for a Wiring contractor).
+--      18 non-project reasons (reason_id) OR a CTP build (ctp_build_id,
+--      Admin Scope Section 7). Exactly one of the three.
+--   2. "Cost code" (cost_code_id) — required for project/reason entries
+--      so time still lands against a department for reporting (e.g.
+--      Holiday + IL-AD for a Wiring contractor); NOT required (and left
+--      NULL) for a CTP entry — CTP staff are department='CTP', which
+--      isn't one of the 58-code catalogue's five departments, so there is
+--      no correct code to force a pick from.
 -- A non-work marker names none of the three and logs zero hours.
 -- ------------------------------------------------------------
 CREATE TABLE timesheet_entry (
@@ -238,28 +304,33 @@ CREATE TABLE timesheet_entry (
     entry_date              DATE NOT NULL,
     project_ref_id          UUID REFERENCES project_ref(id),        -- set for project time, else NULL
     reason_id               UUID REFERENCES non_project_reason(id), -- set for non-project time, else NULL
-    cost_code_id            UUID REFERENCES cost_code(id),          -- always required except on a marker row
+    ctp_build_id            UUID REFERENCES ctp_build_type(id),     -- set for CTP build time, else NULL (Section 7)
+    cost_code_id            UUID REFERENCES cost_code(id),          -- required for project/reason entries; NULL for a CTP entry or a marker row
     hours                   NUMERIC(4,2) NOT NULL DEFAULT 0,
     -- An explicit non-work marker (Section 6: "every contracted day has an
     -- entry (or an explicit non-work marker)") is its own row shape: zero
-    -- hours, names neither a project, a reason, nor a cost code.
+    -- hours, names neither a project, a reason, a CTP build, nor a cost code.
     is_non_work_marker      BOOLEAN NOT NULL DEFAULT FALSE,
     description             TEXT,
-    rate_at_entry           NUMERIC(10,2),      -- snapshotted, never recalculated (Section 4); NULL for markers/non-project
-    calculated_cost_at_entry NUMERIC(10,2),      -- hours * rate_at_entry, snapshotted; NULL for markers/non-project
+    rate_at_entry           NUMERIC(10,2),      -- snapshotted, never recalculated (Section 4); NULL for markers/non-project/CTP
+    calculated_cost_at_entry NUMERIC(10,2),      -- hours * rate_at_entry, snapshotted; NULL for markers/non-project/CTP
     entered_by              UUID NOT NULL REFERENCES users(id), -- defaults to week owner; supervisor if proxy-entered (Section 6)
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    -- Exactly one of (project_ref_id, reason_id) for a real entry, cost
-    -- code always required; a marker names none of the three.
+    -- Exactly one of (project_ref_id, reason_id, ctp_build_id) for a real
+    -- entry; cost code required for the first two, NULL for a CTP entry;
+    -- a marker names none of the four.
     CHECK (
-        (is_non_work_marker AND project_ref_id IS NULL AND reason_id IS NULL AND cost_code_id IS NULL AND hours = 0)
+        (is_non_work_marker AND project_ref_id IS NULL AND reason_id IS NULL AND cost_code_id IS NULL AND ctp_build_id IS NULL AND hours = 0)
         OR
         (NOT is_non_work_marker
-         AND cost_code_id IS NOT NULL
-         AND ((project_ref_id IS NOT NULL AND reason_id IS NULL) OR (project_ref_id IS NULL AND reason_id IS NOT NULL))
-         AND hours > 0 AND hours <= 24)
+         AND hours > 0 AND hours <= 24
+         AND (
+           (project_ref_id IS NOT NULL AND reason_id IS NULL AND ctp_build_id IS NULL AND cost_code_id IS NOT NULL)
+           OR (project_ref_id IS NULL AND reason_id IS NOT NULL AND ctp_build_id IS NULL AND cost_code_id IS NOT NULL)
+           OR (project_ref_id IS NULL AND reason_id IS NULL AND ctp_build_id IS NOT NULL AND cost_code_id IS NULL)
+         ))
     ),
 
     -- Hours rounding: application layer enforces 15-minute increments
@@ -267,17 +338,20 @@ CREATE TABLE timesheet_entry (
     CHECK (hours * 4 = TRUNC(hours * 4))
 );
 
--- Duplicate prevention (Section 4): exact same day + project/reason + cost
--- code blocked. COALESCE handles NULLs — Postgres treats NULL as distinct
--- in a plain UNIQUE constraint, so an expression index is used instead.
--- cost_code_id is NOT NULL for every real entry (enforced by the CHECK
--- above), so it's safe to index directly; only markers have it NULL, and
--- those are covered by the separate one-marker-per-day index below.
+-- Duplicate prevention (Section 4): exact same day + project/reason/CTP-build
+-- + cost code blocked. COALESCE handles NULLs — Postgres treats NULL as
+-- distinct in a plain UNIQUE constraint, so an expression index is used
+-- instead. cost_code_id can legitimately be NULL for a real (non-marker)
+-- CTP entry as of Section 7, so it needs the same NULL-safe sentinel as
+-- project_ref_id/reason_id/ctp_build_id — a bare NULL=NULL comparison
+-- would let two identical CTP entries for the same day through uncaught.
 CREATE UNIQUE INDEX idx_entry_no_duplicates
     ON timesheet_entry (
-        week_id, entry_date, cost_code_id,
+        week_id, entry_date,
+        COALESCE(cost_code_id, '00000000-0000-0000-0000-000000000000'),
         COALESCE(project_ref_id, '00000000-0000-0000-0000-000000000000'),
-        COALESCE(reason_id, '00000000-0000-0000-0000-000000000000')
+        COALESCE(reason_id, '00000000-0000-0000-0000-000000000000'),
+        COALESCE(ctp_build_id, '00000000-0000-0000-0000-000000000000')
     )
     WHERE NOT is_non_work_marker;
 
@@ -289,6 +363,7 @@ CREATE UNIQUE INDEX idx_entry_one_marker_per_day
 CREATE INDEX idx_entry_week ON timesheet_entry(week_id);
 CREATE INDEX idx_entry_project ON timesheet_entry(project_ref_id);
 CREATE INDEX idx_entry_reason ON timesheet_entry(reason_id);
+CREATE INDEX idx_entry_ctp_build ON timesheet_entry(ctp_build_id);
 CREATE INDEX idx_entry_cost_code ON timesheet_entry(cost_code_id);
 CREATE INDEX idx_entry_entered_by ON timesheet_entry(entered_by);
 CREATE INDEX idx_entry_date ON timesheet_entry(entry_date);

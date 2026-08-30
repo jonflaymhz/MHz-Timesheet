@@ -28,6 +28,10 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   if (req.query.capability === 'approval') clauses.push(`u.can_approve = TRUE`);
   if (req.query.capability === 'payroll_admin') clauses.push(`u.is_payroll_admin = TRUE`);
   if (req.query.capability === 'system_admin') clauses.push(`u.is_system_admin = TRUE`);
+  if (req.query.employment_type) {
+    params.push(req.query.employment_type);
+    clauses.push(`u.employment_type = $${params.length}`);
+  }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
   const result = await db.query(
@@ -273,7 +277,7 @@ router.get('/projects', requireAuth, requireSystemAdmin, async (req, res) => {
     where += ` AND (qw_project_number ILIKE $${params.length} OR project_name ILIKE $${params.length})`;
   }
   const result = await db.query(
-    `SELECT id, qw_project_number, project_name, qw_status, is_open, admin_override, last_synced_at,
+    `SELECT id, qw_project_number, project_name, qw_status, is_open, admin_override, timesheet_enabled, last_synced_at,
             COALESCE(admin_override, is_open) AS effective_open
        FROM project_ref WHERE ${where} ORDER BY qw_project_number`,
     params
@@ -312,6 +316,89 @@ router.post('/projects/:id/reopen', requireAuth, requireSystemAdmin, async (req,
   res.json({ message: `${result.rows[0].qw_project_number} reopened` });
 });
 
+// Stage 1 global switch (Admin Scope Section 6.1) — distinct from Close/
+// Reopen above, which track whether QW itself considers the project live.
+// This is the deliberate "make it bookable in the timesheet at all" step,
+// System admin only per the doc's heading.
+router.post('/projects/:id/enable-timesheet', requireAuth, requireSystemAdmin, async (req, res) => {
+  const result = await db.query(
+    `UPDATE project_ref SET timesheet_enabled = TRUE WHERE id = $1 RETURNING id, qw_project_number`,
+    [req.params.id]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Project not found' });
+  await db.query(
+    `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by)
+     VALUES ('enable_project_timesheet', 'project_ref', $1, $2)`,
+    [req.params.id, req.user.id]
+  );
+  res.json({ message: `${result.rows[0].qw_project_number} opened for timesheet entry` });
+});
+
+router.post('/projects/:id/disable-timesheet', requireAuth, requireSystemAdmin, async (req, res) => {
+  const result = await db.query(
+    `UPDATE project_ref SET timesheet_enabled = FALSE WHERE id = $1 RETURNING id, qw_project_number`,
+    [req.params.id]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Project not found' });
+  await db.query(
+    `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by)
+     VALUES ('disable_project_timesheet', 'project_ref', $1, $2)`,
+    [req.params.id, req.user.id]
+  );
+  res.json({ message: `${result.rows[0].qw_project_number} hidden from new timesheet entries — existing logged time is unaffected` });
+});
+
+// Stage 2 per-project visibility list (Admin Scope Section 6.2) — only
+// meaningful for a contractor account; an employee is visible by default
+// once a project is globally enabled, so adding one here is a harmless
+// no-op rather than an error.
+router.get('/projects/:id/visibility', requireAuth, requireSystemAdmin, async (req, res) => {
+  const result = await db.query(
+    `SELECT u.id, u.full_name, u.username, pv.added_at
+       FROM project_visibility pv JOIN users u ON u.id = pv.user_id
+      WHERE pv.project_ref_id = $1
+      ORDER BY u.full_name`,
+    [req.params.id]
+  );
+  res.json(result.rows);
+});
+
+router.post('/projects/:id/visibility', requireAuth, requireSystemAdmin, async (req, res) => {
+  const { user_id } = req.body;
+  if (!user_id) return res.status(400).json({ error: 'user_id is required' });
+  const project = (await db.query(`SELECT qw_project_number FROM project_ref WHERE id = $1`, [req.params.id])).rows[0];
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  try {
+    await db.query(
+      `INSERT INTO project_visibility (project_ref_id, user_id, added_by) VALUES ($1, $2, $3)`,
+      [req.params.id, user_id, req.user.id]
+    );
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Already on this project\'s visibility list' });
+    throw err;
+  }
+  await db.query(
+    `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by, new_value)
+     VALUES ('add_project_visibility', 'project_ref', $1, $2, $3)`,
+    [req.params.id, req.user.id, JSON.stringify({ user_id })]
+  );
+  res.status(201).json({ message: `Added to ${project.qw_project_number}'s visibility list` });
+});
+
+router.delete('/projects/:id/visibility/:userId', requireAuth, requireSystemAdmin, async (req, res) => {
+  const result = await db.query(
+    `DELETE FROM project_visibility WHERE project_ref_id = $1 AND user_id = $2 RETURNING user_id`,
+    [req.params.id, req.params.userId]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Not on this project\'s visibility list' });
+  await db.query(
+    `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by, old_value)
+     VALUES ('remove_project_visibility', 'project_ref', $1, $2, $3)`,
+    [req.params.id, req.user.id, JSON.stringify({ user_id: req.params.userId })]
+  );
+  res.json({ message: 'Removed from visibility list' });
+});
+
 // ── Cost codes (Section 8) ──────────────────────────────────────
 // Rates don't need to come from QW (confirmed) — admin sets/maintains them
 // directly here instead of relying on the rate_code sync match.
@@ -329,6 +416,53 @@ router.patch('/cost-codes/:id', requireAuth, requireSystemAdmin, async (req, res
   );
   if (!result.rows[0]) return res.status(404).json({ error: 'Cost code not found' });
   res.json(result.rows[0]);
+});
+
+// ── CTP device/build tracking (Section 7) ────────────────────────
+// Lightweight, admin-managed list — no QW involvement, unlike the synced
+// project/cost-code lists above. Aggregate by build/device type, not
+// serial-level (Section 9 open question).
+router.get('/ctp-builds', requireAuth, requireSystemAdmin, async (req, res) => {
+  const result = await db.query(`SELECT * FROM ctp_build_type ORDER BY name`);
+  res.json(result.rows);
+});
+
+router.post('/ctp-builds', requireAuth, requireSystemAdmin, async (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  try {
+    const result = await db.query(`INSERT INTO ctp_build_type (name) VALUES ($1) RETURNING *`, [name]);
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'A build type with this name already exists' });
+    throw err;
+  }
+});
+
+router.patch('/ctp-builds/:id', requireAuth, requireSystemAdmin, async (req, res) => {
+  const { name, is_active } = req.body;
+  const result = await db.query(
+    `UPDATE ctp_build_type SET name = COALESCE($2, name), is_active = COALESCE($3, is_active)
+      WHERE id = $1 RETURNING *`,
+    [req.params.id, name, is_active]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Build type not found' });
+  res.json(result.rows[0]);
+});
+
+// Hours by device/build type (Section 7/8) — feeds back into CTP pricing.
+// Not date-filtered this batch; a to-date total is enough to see which
+// builds are cheap or expensive to make, which is the stated purpose.
+router.get('/reports/ctp-hours', requireAuth, requireSystemAdmin, async (req, res) => {
+  const result = await db.query(
+    `SELECT cbt.id, cbt.name, cbt.is_active, COALESCE(SUM(te.hours), 0) AS total_hours,
+            COUNT(DISTINCT te.week_id) AS weeks_logged
+       FROM ctp_build_type cbt
+       LEFT JOIN timesheet_entry te ON te.ctp_build_id = cbt.id AND NOT te.is_non_work_marker
+      GROUP BY cbt.id, cbt.name, cbt.is_active
+      ORDER BY total_hours DESC, cbt.name`
+  );
+  res.json(result.rows);
 });
 
 // ── Override tools: Correct / Unsubmit (Section 5, admin-tier only) ──

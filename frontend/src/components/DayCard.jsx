@@ -42,9 +42,9 @@ export default function DayCard({ date, label, entries, weekId, department, edit
         <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderTop: '1px solid var(--border)' }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontWeight: 500, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {e.project_name || e.reason_name}
+              {e.project_name || e.reason_name || e.ctp_build_name}
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text3)' }}>{e.cost_code}
+            <div style={{ fontSize: 12, color: 'var(--text3)' }}>{e.cost_code || 'CTP build'}
               {weekOwnerId && e.entered_by !== weekOwnerId && <span style={{ color: 'var(--amber)', fontWeight: 600 }}> · proxy</span>}
             </div>
           </div>

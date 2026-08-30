@@ -27,10 +27,12 @@ async function weekWithEntries(weekId) {
     db.query(`SELECT * FROM timesheet_week WHERE id = $1`, [weekId]),
     db.query(
       `SELECT te.*, pr.qw_project_number, pr.project_name, npr.name AS reason_name,
+              cbt.name AS ctp_build_name,
               cc.code AS cost_code, cc.description AS cost_code_description
          FROM timesheet_entry te
          LEFT JOIN project_ref pr ON pr.id = te.project_ref_id
          LEFT JOIN non_project_reason npr ON npr.id = te.reason_id
+         LEFT JOIN ctp_build_type cbt ON cbt.id = te.ctp_build_id
          LEFT JOIN cost_code cc ON cc.id = te.cost_code_id
         WHERE te.week_id = $1
         ORDER BY te.entry_date, te.created_at`,
@@ -126,7 +128,7 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
   if (!allowed) return res.status(403).json({ error: 'Not authorised to edit this week' });
   if (!isEditable(week)) return res.status(400).json({ error: 'Week is locked and cannot be edited' });
 
-  const { entry_date, project_ref_id, reason_id, cost_code_id, hours, description, is_non_work_marker } = req.body;
+  const { entry_date, project_ref_id, reason_id, ctp_build_id, cost_code_id, hours, description, is_non_work_marker } = req.body;
   if (!entry_date || entry_date < week.week_start_date || entry_date > week.week_end_date) {
     return res.status(400).json({ error: 'entry_date must fall within this week' });
   }
@@ -148,35 +150,57 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
     }
   }
 
-  if (!cost_code_id) return res.status(400).json({ error: 'cost_code_id is required' });
-  if (!project_ref_id && !reason_id) return res.status(400).json({ error: 'Either project_ref_id or reason_id is required' });
-  if (project_ref_id && reason_id) return res.status(400).json({ error: 'project_ref_id and reason_id are mutually exclusive' });
+  const targets = [project_ref_id, reason_id, ctp_build_id].filter(Boolean);
+  if (targets.length === 0) return res.status(400).json({ error: 'One of project_ref_id, reason_id, or ctp_build_id is required' });
+  if (targets.length > 1) return res.status(400).json({ error: 'project_ref_id, reason_id, and ctp_build_id are mutually exclusive' });
+  // Section 7: a CTP entry has no cost code — CTP staff aren't in any of
+  // the 58-code catalogue's five departments, so there's no correct one
+  // to force a pick from.
+  if (!ctp_build_id && !cost_code_id) return res.status(400).json({ error: 'cost_code_id is required' });
   if (!hours || hours <= 0) return res.status(400).json({ error: 'hours must be greater than zero' });
 
   if (project_ref_id) {
+    // Visibility (Section 6) is checked against the week OWNER, not
+    // whoever's actually typing this in — a proxy-entering supervisor's
+    // own access never substitutes for the subcontractor's.
     const projResult = await db.query(
-      `SELECT COALESCE(admin_override, is_open) AS open FROM project_ref WHERE id = $1`,
-      [project_ref_id]
+      `SELECT COALESCE(pr.admin_override, pr.is_open) AS open, pr.timesheet_enabled,
+              (u.employment_type = 'employee' OR EXISTS (
+                 SELECT 1 FROM project_visibility pv WHERE pv.project_ref_id = pr.id AND pv.user_id = u.id
+              )) AS visible_to_owner
+         FROM project_ref pr, users u
+        WHERE pr.id = $1 AND u.id = $2`,
+      [project_ref_id, week.user_id]
     );
-    if (!projResult.rows[0]) return res.status(400).json({ error: 'Unknown project' });
-    if (!projResult.rows[0].open) return res.status(400).json({ error: 'This project is closed to new time booking' });
+    const proj = projResult.rows[0];
+    if (!proj) return res.status(400).json({ error: 'Unknown project' });
+    if (!proj.open) return res.status(400).json({ error: 'This project is closed to new time booking' });
+    if (!proj.timesheet_enabled) return res.status(400).json({ error: 'This project is not yet open for timesheet entry' });
+    if (!proj.visible_to_owner) return res.status(400).json({ error: 'This project is not available to this person' });
+  }
+  if (ctp_build_id) {
+    const buildResult = await db.query(`SELECT 1 FROM ctp_build_type WHERE id = $1 AND is_active`, [ctp_build_id]);
+    if (!buildResult.rows[0]) return res.status(400).json({ error: 'Unknown or inactive CTP build type' });
   }
 
-  const costResult = await db.query(`SELECT current_rate FROM cost_code WHERE id = $1 AND is_active`, [cost_code_id]);
-  if (!costResult.rows[0]) return res.status(400).json({ error: 'Unknown cost code' });
-  const rate = costResult.rows[0].current_rate;
+  let rate = null;
+  if (cost_code_id) {
+    const costResult = await db.query(`SELECT current_rate FROM cost_code WHERE id = $1 AND is_active`, [cost_code_id]);
+    if (!costResult.rows[0]) return res.status(400).json({ error: 'Unknown cost code' });
+    rate = costResult.rows[0].current_rate;
+  }
   // Rate snapshotting (Section 4): calculated only for project time — non-
-  // project time is informational only, never part of cost-vs-budget
-  // reporting (Section 9), so it's never costed even if a rate exists.
+  // project and CTP time is informational only, never part of cost-vs-
+  // budget reporting (Section 9), so it's never costed even if a rate exists.
   const rateAtEntry = project_ref_id ? rate : null;
   const cost = project_ref_id && rate != null ? Number(hours) * Number(rate) : null;
 
   try {
     const result = await db.query(
       `INSERT INTO timesheet_entry
-         (week_id, entry_date, project_ref_id, reason_id, cost_code_id, hours, description, rate_at_entry, calculated_cost_at_entry, entered_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [week.id, entry_date, project_ref_id || null, reason_id || null, cost_code_id, hours, description || null, rateAtEntry, cost, req.user.id]
+         (week_id, entry_date, project_ref_id, reason_id, ctp_build_id, cost_code_id, hours, description, rate_at_entry, calculated_cost_at_entry, entered_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [week.id, entry_date, project_ref_id || null, reason_id || null, ctp_build_id || null, cost_code_id || null, hours, description || null, rateAtEntry, cost, req.user.id]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
