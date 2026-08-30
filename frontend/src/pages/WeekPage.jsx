@@ -4,6 +4,7 @@ import { api } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 import DayCard from '../components/DayCard.jsx'
 import { fmtRange, dayOfMonth, weekdayName } from '../lib/dates.js'
+import { canApprove } from '../lib/capabilities.js'
 
 function addDays(dateStr, n) {
   const d = new Date(dateStr + 'T00:00:00Z')
@@ -98,7 +99,7 @@ export default function WeekPage() {
   const editable = week.status === 'draft' || week.status === 'rejected'
   const weekTotal = entries.reduce((s, e) => s + Number(e.hours), 0)
   const isProxyView = forUserId && forUserId !== user?.id
-  const canReview = isProxyView && week.status === 'submitted' && ['supervisor', 'admin', 'jonny'].includes(user?.role)
+  const canReview = isProxyView && week.status === 'submitted' && canApprove(user)
 
   return (
     <div className="page">

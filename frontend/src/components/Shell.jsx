@@ -1,13 +1,14 @@
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth.jsx'
+import { canApprove, isOverrideAuthority } from '../lib/capabilities.js'
 
 export default function Shell() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
 
-  const showTeamTab = ['supervisor', 'admin', 'jonny'].includes(user?.role)
-  const showAdminTab = ['admin', 'jonny'].includes(user?.role)
+  const showTeamTab = canApprove(user)
+  const showAdminTab = isOverrideAuthority(user)
 
   async function handleLogout() {
     await logout()

@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const db = require('../db/pool');
 
@@ -9,6 +10,12 @@ function isValidPin(pin) {
 
 async function hashPin(pin) {
   return bcrypt.hash(pin, 10);
+}
+
+// Auto-generated on account creation / admin-forced reset — the admin
+// never types a PIN by hand (admin scope Section 3.2).
+function generatePin() {
+  return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 }
 
 // Verifies a PIN against a locked-out-aware flow (Section 3, confirmed):
@@ -48,4 +55,4 @@ function needsPinReverify(user, staleDays = 30) {
   return Date.now() - new Date(user.pin_last_verified_at).getTime() > staleMs;
 }
 
-module.exports = { isValidPin, hashPin, verifyPin, needsPinReverify, MAX_ATTEMPTS };
+module.exports = { isValidPin, hashPin, verifyPin, needsPinReverify, generatePin, MAX_ATTEMPTS };

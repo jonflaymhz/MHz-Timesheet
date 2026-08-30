@@ -1,11 +1,16 @@
 -- ============================================================
--- Megahertz Timesheet System — Database Schema v1.2
+-- Megahertz Timesheet System — Database Schema v1.3
 -- Separate database: mhz_timesheet
--- Reference: MHz_Timesheet_Scope_v1_0.md (Section 13 revision)
--- v1.2 changelog vs v1.1: two-field category model (cost_code +
--- non_project_reason, replacing the single polymorphic category
--- table), users.department, PIN policy fields (6-digit, monthly
--- re-verify, 5-attempt lockout), ISO week numbering confirmed.
+-- Reference: MHz_Timesheet_Scope_v1_0.md (Section 13 revision),
+-- MHz_Timesheet_Admin_Scope_v1_0.md (admin/management batch 1)
+-- v1.3 changelog vs v1.2: users.role enum replaced by independent
+-- capability flags (can_approve/is_payroll_admin/is_system_admin)
+-- so a person can hold more than one; users.removed_at added as a
+-- distinct state from is_active (freeze vs remove); users.
+-- last_login_at added; user_mfa_backup_codes table added; new
+-- audit_action values for reset-pin/reset-password/reset-mfa/
+-- freeze/unfreeze/remove/restore/update/mfa-enrolled; user_sessions
+-- gained pending_mfa_enrollment for the enrollment-in-progress state.
 -- ============================================================
 -- This database is standalone. No foreign keys, views, or
 -- cross-database queries into mhz_quoting. The only connection
@@ -21,10 +26,13 @@
 -- (qw_status = 'active') exactly, per that confirmed answer.
 -- ============================================================
 
-CREATE TYPE user_role AS ENUM ('employee', 'contractor', 'supervisor', 'admin', 'jonny');
 CREATE TYPE employment_type AS ENUM ('employee', 'contractor');
 CREATE TYPE week_status AS ENUM ('draft', 'submitted', 'approved', 'rejected');
-CREATE TYPE audit_action AS ENUM ('correct', 'unsubmit', 'approve', 'reject', 'close_project', 'reopen_project', 'unlock_pin');
+CREATE TYPE audit_action AS ENUM (
+    'correct', 'unsubmit', 'approve', 'reject', 'close_project', 'reopen_project', 'unlock_pin',
+    'reset_pin', 'reset_password', 'reset_mfa', 'mfa_enrolled',
+    'freeze_user', 'unfreeze_user', 'remove_user', 'restore_user', 'update_user'
+);
 
 -- ------------------------------------------------------------
 -- Users
@@ -48,23 +56,55 @@ CREATE TABLE users (
     pin_last_verified_at TIMESTAMPTZ,    -- app re-prompts for PIN when this is >~30 days old
     -- Admin/Jonny tier is specced as "proper 2FA, same standard as the rest
     -- of QW" (Section 3) — a short numeric PIN plus TOTP doesn't meet that
-    -- bar on its own. Elevated roles (admin, jonny) use password_hash as
-    -- their primary secret instead of pin_hash, with mfa_enabled forced
-    -- true at the application layer. Standard tier (employee/contractor/
-    -- supervisor) leaves password_hash NULL and uses pin_hash only.
-    password_hash   TEXT,               -- bcrypt hash; admin/jonny tier primary credential
-    role            user_role NOT NULL DEFAULT 'employee',
+    -- bar on its own. Admin-tier accounts (is_payroll_admin or
+    -- is_system_admin) use password_hash + TOTP; a floor account uses
+    -- pin_hash only. As of v1.3 these are no longer mutually exclusive —
+    -- a person can hold a PIN (their own timesheet) and admin flags
+    -- (management access) at the same time.
+    password_hash   TEXT,               -- bcrypt hash; admin-tier primary credential
+    -- Capability flags (admin scope v1.0 Section 2) replace the old flat
+    -- user_role enum so a person can hold more than one simultaneously.
+    -- "Entry" needs no flag of its own — implied by pin_hash IS NOT NULL.
+    can_approve      BOOLEAN NOT NULL DEFAULT FALSE, -- Approval: reviews/approves reports' timesheets
+    is_payroll_admin BOOLEAN NOT NULL DEFAULT FALSE, -- Admin — Payroll/Finance ("Jonny's role")
+    is_system_admin  BOOLEAN NOT NULL DEFAULT FALSE, -- Admin — System (user/project/cost-code management)
     employment_type employment_type NOT NULL DEFAULT 'employee',
     reports_to      UUID REFERENCES users(id),   -- line manager (Section 3)
-    mfa_enabled     BOOLEAN NOT NULL DEFAULT FALSE, -- true for admin/jonny tier only
-    mfa_secret      TEXT,               -- TOTP secret, admin/jonny tier only
-    is_active       BOOLEAN NOT NULL DEFAULT TRUE, -- deactivate, never delete (Section 3)
+    mfa_enabled     BOOLEAN NOT NULL DEFAULT FALSE, -- true once TOTP enrollment is confirmed
+    mfa_secret      TEXT,               -- TOTP secret; set (unconfirmed) during enrollment, confirmed by mfa_enabled
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE, -- freeze/unfreeze toggle (never a hard delete)
+    -- Remove is distinct from Freeze (admin scope Section 3.3): a removed
+    -- user is always also frozen (see chk_removed_implies_inactive below),
+    -- but not every frozen user has been removed. Restoring clears this
+    -- while deliberately leaving is_active FALSE — a separate reactivate
+    -- step is required to actually let them log in again.
+    removed_at      TIMESTAMPTZ,
+    last_login_at   TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT chk_removed_implies_inactive CHECK (removed_at IS NULL OR NOT is_active)
 );
 
 CREATE INDEX idx_users_reports_to ON users(reports_to);
 CREATE INDEX idx_users_active ON users(is_active);
+CREATE INDEX idx_users_removed_at ON users(removed_at) WHERE removed_at IS NOT NULL;
+
+-- ------------------------------------------------------------
+-- MFA backup codes — 8-10 single-use codes shown once at enrollment
+-- (admin scope Section 4.2 break-glass). Consuming one at login (as a
+-- TOTP fallback) is not yet built; reset-mfa (another admin resets and
+-- forces re-enrollment) is the recovery path for now.
+-- ------------------------------------------------------------
+CREATE TABLE user_mfa_backup_codes (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     UUID NOT NULL REFERENCES users(id),
+    code_hash   TEXT NOT NULL,
+    used_at     TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_mfa_backup_user ON user_mfa_backup_codes(user_id);
 
 -- ------------------------------------------------------------
 -- Sessions (own auth, entirely separate from QW's user_sessions)
@@ -75,6 +115,10 @@ CREATE TABLE user_sessions (
     session_token   TEXT NOT NULL UNIQUE,
     device_label    TEXT,               -- e.g. "Dave's phone", "Factory kiosk"
     is_kiosk        BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Set for a short-TTL session created between password-check success
+    -- and MFA enrollment completing — restricted to the enrollment routes
+    -- only (see middleware/auth.js requireAuth) until confirmed.
+    pending_mfa_enrollment BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at      TIMESTAMPTZ NOT NULL,
     revoked_at      TIMESTAMPTZ
@@ -331,4 +375,42 @@ CREATE INDEX idx_sync_log_started ON qw_sync_log(started_at);
 --    "fixed" here, carried through as-given from the scope doc;
 --    confirm against the actual Excel before the cost_code seed
 --    data is finalised.
+-- ============================================================
+
+-- ============================================================
+-- v1.3 changes vs v1.2 (Admin & Management Scope v1.0, Batch 1 —
+-- role-split migration, admin Users page, MFA self-enrollment):
+--
+-- 1. user_role enum and users.role column removed outright. A flat
+--    single-value role couldn't represent a person holding more than
+--    one functional capability at once (e.g. Payroll admin without
+--    System admin). Replaced with independent boolean flags:
+--    can_approve (was 'supervisor'), is_payroll_admin (was 'jonny'),
+--    is_system_admin (was 'admin'). "Entry" needs no flag — implied
+--    by pin_hash IS NOT NULL.
+--
+-- 2. users.removed_at added, distinct from is_active: Freeze reuses
+--    is_active (reversible, temporary), Remove is the new removed_at
+--    (soft-delete only, per admin scope 3.3 — no hard delete of a
+--    user with submitted timesheet history). A removed user is always
+--    also frozen (chk_removed_implies_inactive), so every existing
+--    "WHERE is_active = TRUE" query already excludes removed users.
+--
+-- 3. users.last_login_at added, feeding the admin Users list.
+--
+-- 4. PIN and password/MFA are no longer mutually exclusive (v1.2's
+--    comment assumed elevated roles used password *instead of* PIN) —
+--    a System admin who also logs their own timesheet now needs both.
+--
+-- 5. user_mfa_backup_codes added: one-time backup codes generated at
+--    enrollment (confirmed break-glass approach, admin scope Section
+--    4.2/8). Consuming one at login is not yet built.
+--
+-- 6. user_sessions.pending_mfa_enrollment added: a short-TTL session
+--    state between password-check success and MFA enrollment
+--    completing, restricted to the enrollment routes only.
+--
+-- 7. audit_action gained: reset_pin, reset_password, reset_mfa,
+--    mfa_enrolled, freeze_user, unfreeze_user, remove_user,
+--    restore_user, update_user.
 -- ============================================================

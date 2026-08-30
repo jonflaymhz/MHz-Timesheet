@@ -1,9 +1,11 @@
 const express = require('express');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
+const QRCode = require('qrcode');
 const { authenticator } = require('otplib');
 const db = require('../db/pool');
 const { verifyPin, isValidPin } = require('../services/pin');
-const { createSession, revokeSession } = require('../services/session');
+const { createSession, revokeSession, revokeAllSessionsForUser } = require('../services/session');
 const { requireAuth, COOKIE_NAME } = require('../middleware/auth');
 
 const router = express.Router();
@@ -15,13 +17,10 @@ const router = express.Router();
 // like it succeeds while no session actually persists. Once a real
 // certificate is in place this becomes correct automatically, no env var
 // to remember to flip.
+const COOKIE_OPTS = { httpOnly: true, sameSite: 'lax' };
+
 function setSessionCookie(req, res, token, expiresAt) {
-  res.cookie(COOKIE_NAME, token, {
-    httpOnly: true,
-    secure: req.secure,
-    sameSite: 'lax',
-    expires: expiresAt,
-  });
+  res.cookie(COOKIE_NAME, token, { ...COOKIE_OPTS, secure: req.secure, expires: expiresAt });
 }
 
 // ── GET /api/auth/kiosk-users ─────────────────────────────────
@@ -68,20 +67,24 @@ router.post('/login', async (req, res) => {
     deviceLabel: device_label || null,
     isKiosk: !!is_kiosk,
   });
+  await db.query(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [user.id]);
   setSessionCookie(req, res, token, expiresAt);
-  res.json({ id: user.id, full_name: user.full_name, role: user.role });
+  res.json({ id: user.id, full_name: user.full_name });
 });
 
 // ── POST /api/auth/admin-login ────────────────────────────────
-// Admin/Jonny tier: username + password + TOTP. Matches "the same standard
-// as the rest of QW" (Section 3) — this tier can edit locked data.
+// Admin tier (Payroll and/or System admin): username + password + TOTP.
+// Matches "the same standard as the rest of QW" (Section 3). An account
+// that hasn't completed MFA enrollment yet (mfa_enabled false) gets a
+// short-lived pending session instead of a real one — it can only reach
+// the /mfa/enroll/* routes below until enrollment is confirmed.
 router.post('/admin-login', async (req, res) => {
   const { username, password, totp_code } = req.body;
-  if (!username || !password || !totp_code) {
-    return res.status(400).json({ error: 'Username, password, and authenticator code are all required' });
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password are required' });
   }
   const userResult = await db.query(
-    `SELECT * FROM users WHERE username = $1 AND is_active = TRUE AND role IN ('admin', 'jonny')`,
+    `SELECT * FROM users WHERE username = $1 AND is_active = TRUE AND (is_payroll_admin OR is_system_admin)`,
     [username]
   );
   const user = userResult.rows[0];
@@ -92,16 +95,105 @@ router.post('/admin-login', async (req, res) => {
   if (!passwordOk) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
+
   if (!user.mfa_enabled || !user.mfa_secret) {
-    return res.status(403).json({ error: 'Two-factor authentication is not set up for this account' });
+    const { token, expiresAt } = await createSession(user.id, {
+      deviceLabel: req.body.device_label,
+      pendingMfaEnrollment: true,
+    });
+    setSessionCookie(req, res, token, expiresAt);
+    return res.json({ id: user.id, full_name: user.full_name, mfa_enrollment_required: true });
+  }
+
+  if (!totp_code) {
+    return res.status(400).json({ error: 'Authenticator code is required' });
   }
   const totpOk = authenticator.check(totp_code, user.mfa_secret);
   if (!totpOk) {
     return res.status(401).json({ error: 'Invalid authenticator code' });
   }
   const { token, expiresAt } = await createSession(user.id, { deviceLabel: req.body.device_label, elevated: true });
+  await db.query(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [user.id]);
   setSessionCookie(req, res, token, expiresAt);
-  res.json({ id: user.id, full_name: user.full_name, role: user.role });
+  res.json({ id: user.id, full_name: user.full_name });
+});
+
+// ── POST /api/auth/mfa/enroll/start ───────────────────────────
+// Only reachable with a pending-enrollment session (requireAuth 403s any
+// other route while pending). Generates a TOTP secret and returns a QR
+// code plus the manual-entry fallback (admin scope Section 4.2). Reuses
+// an already-pending secret rather than regenerating on a page refresh,
+// so a QR the user already scanned doesn't silently go stale.
+router.post('/mfa/enroll/start', requireAuth, async (req, res) => {
+  if (!req.pendingMfaEnrollment) {
+    return res.status(400).json({ error: 'MFA is already enrolled for this account' });
+  }
+  const current = await db.query(`SELECT mfa_secret FROM users WHERE id = $1`, [req.user.id]);
+  let secret = current.rows[0]?.mfa_secret;
+  if (!secret) {
+    secret = authenticator.generateSecret();
+    await db.query(`UPDATE users SET mfa_secret = $2 WHERE id = $1`, [req.user.id, secret]);
+  }
+  const otpauthUrl = authenticator.keyuri(req.user.username, 'MHz Timesheet', secret);
+  const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
+  res.json({ otpauth_url: otpauthUrl, manual_entry_key: secret, qr_code_data_url: qrCodeDataUrl });
+});
+
+// ── POST /api/auth/mfa/enroll/confirm ─────────────────────────
+// Verifies the first real code, activates MFA, generates one-time backup
+// codes (admin scope Section 4.2/8 — confirmed break-glass approach), and
+// upgrades the pending session into a real one in the same request so
+// there's no gap where the account is usable without MFA complete.
+router.post('/mfa/enroll/confirm', requireAuth, async (req, res) => {
+  if (!req.pendingMfaEnrollment) {
+    return res.status(400).json({ error: 'MFA is already enrolled for this account' });
+  }
+  const { totp_code } = req.body;
+  const current = await db.query(`SELECT mfa_secret FROM users WHERE id = $1`, [req.user.id]);
+  const secret = current.rows[0]?.mfa_secret;
+  if (!secret || !totp_code || !authenticator.check(totp_code, secret)) {
+    return res.status(401).json({ error: 'Invalid authenticator code' });
+  }
+
+  const BACKUP_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  const backupCodes = Array.from({ length: 10 }, () => {
+    const raw = Array.from(crypto.randomFillSync(new Uint8Array(8)))
+      .map(b => BACKUP_ALPHABET[b % BACKUP_ALPHABET.length])
+      .join('');
+    return `${raw.slice(0, 4)}-${raw.slice(4)}`;
+  });
+
+  // Everything below is one all-or-nothing unit — a partial failure here
+  // must never leave mfa_enabled=true without matching backup codes, or a
+  // pending session that never got upgraded.
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    await client.query(`UPDATE users SET mfa_enabled = TRUE, last_login_at = NOW() WHERE id = $1`, [req.user.id]);
+    for (const code of backupCodes) {
+      const codeHash = await bcrypt.hash(code, 10);
+      await client.query(
+        `INSERT INTO user_mfa_backup_codes (user_id, code_hash) VALUES ($1, $2)`,
+        [req.user.id, codeHash]
+      );
+    }
+    await client.query(
+      `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by) VALUES ('mfa_enrolled', 'user', $1, $1)`,
+      [req.user.id]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  await revokeSession(req.sessionToken);
+  const { token, expiresAt } = await createSession(req.user.id, { elevated: true });
+  setSessionCookie(req, res, token, expiresAt);
+
+  res.json({ backup_codes: backupCodes });
 });
 
 router.post('/logout', requireAuth, async (req, res) => {
@@ -111,7 +203,7 @@ router.post('/logout', requireAuth, async (req, res) => {
 });
 
 router.get('/me', requireAuth, async (req, res) => {
-  res.json(req.user);
+  res.json({ ...req.user, mfa_enrollment_required: req.pendingMfaEnrollment });
 });
 
 module.exports = router;

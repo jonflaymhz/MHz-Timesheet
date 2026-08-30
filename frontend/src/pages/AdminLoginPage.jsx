@@ -18,9 +18,9 @@ export default function AdminLoginPage() {
     e.preventDefault()
     setError(''); setLoading(true)
     try {
-      await api.post('/auth/admin-login', { username, password, totp_code: totpCode })
+      const result = await api.post('/auth/admin-login', { username, password, totp_code: totpCode })
       await refresh()
-      navigate('/')
+      navigate(result.mfa_enrollment_required ? '/mfa-enroll' : '/')
     } catch (err) {
       setError(err.message)
     } finally {

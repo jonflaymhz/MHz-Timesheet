@@ -14,8 +14,8 @@ async function loadWeekWithAuthority(weekId, requester) {
   const week = result.rows[0];
   if (!week) return { week: null, allowed: false, isProxy: false };
   if (week.user_id === requester.id) return { week, allowed: true, isProxy: false };
-  if (['admin', 'jonny'].includes(requester.role)) return { week, allowed: true, isProxy: true };
-  if (requester.role === 'supervisor') {
+  if (requester.is_payroll_admin || requester.is_system_admin) return { week, allowed: true, isProxy: true };
+  if (requester.can_approve) {
     const ownerResult = await db.query(`SELECT reports_to FROM users WHERE id = $1`, [week.user_id]);
     if (ownerResult.rows[0]?.reports_to === requester.id) return { week, allowed: true, isProxy: true };
   }
@@ -77,8 +77,8 @@ router.get('/mine', requireAuth, async (req, res) => {
 router.get('/for/:userId', requireAuth, async (req, res) => {
   const targetId = req.params.userId;
   if (targetId !== req.user.id) {
-    if (!['admin', 'jonny'].includes(req.user.role)) {
-      if (req.user.role !== 'supervisor') return res.status(403).json({ error: 'Not authorised' });
+    if (!req.user.is_payroll_admin && !req.user.is_system_admin) {
+      if (!req.user.can_approve) return res.status(403).json({ error: 'Not authorised' });
       const ownerResult = await db.query(`SELECT reports_to FROM users WHERE id = $1`, [targetId]);
       if (ownerResult.rows[0]?.reports_to !== req.user.id) return res.status(403).json({ error: 'Not authorised' });
     }
@@ -237,8 +237,8 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
   const { week, allowed } = await loadWeekWithAuthority(req.params.id, req.user);
   if (!week) return res.status(404).json({ error: 'Week not found' });
   if (!allowed) return res.status(403).json({ error: 'Not authorised to approve this week' });
-  if (!['supervisor', 'admin', 'jonny'].includes(req.user.role)) {
-    return res.status(403).json({ error: 'Requires supervisor access' });
+  if (!req.user.can_approve && !req.user.is_payroll_admin && !req.user.is_system_admin) {
+    return res.status(403).json({ error: 'Requires approval access' });
   }
   if (week.status !== 'submitted') {
     return res.status(400).json({ error: 'Only a submitted week can be approved' });
@@ -267,8 +267,8 @@ router.post('/:id/reject', requireAuth, async (req, res) => {
   const { week, allowed } = await loadWeekWithAuthority(req.params.id, req.user);
   if (!week) return res.status(404).json({ error: 'Week not found' });
   if (!allowed) return res.status(403).json({ error: 'Not authorised to reject this week' });
-  if (!['supervisor', 'admin', 'jonny'].includes(req.user.role)) {
-    return res.status(403).json({ error: 'Requires supervisor access' });
+  if (!req.user.can_approve && !req.user.is_payroll_admin && !req.user.is_system_admin) {
+    return res.status(403).json({ error: 'Requires approval access' });
   }
   if (week.status !== 'submitted') {
     return res.status(400).json({ error: 'Only a submitted week can be rejected' });

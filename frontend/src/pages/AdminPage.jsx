@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { api } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
+import { isSystemAdmin } from '../lib/capabilities.js'
 
 const TABS = [
   { key: 'users', label: 'Users' },
@@ -12,11 +13,17 @@ const TABS = [
   { key: 'health', label: 'Integration' },
 ]
 
+const STATUS_COLORS = {
+  active: { bg: 'var(--status-good-bg)', text: 'var(--status-good-text)' },
+  frozen: { bg: 'var(--status-warn-bg)', text: 'var(--status-warn-text)' },
+  removed: { bg: 'var(--status-bad-bg)', text: 'var(--status-bad-text)' },
+}
+
 export default function AdminPage() {
   const { user } = useAuth()
   const [tab, setTab] = useState('users')
-  const isAdmin = user?.role === 'admin'
-  const visibleTabs = TABS.filter(t => isAdmin || !['users'].includes(t.key))
+  const isAdmin = isSystemAdmin(user)
+  const visibleTabs = TABS.filter(t => isAdmin || !['users', 'costcodes'].includes(t.key))
 
   return (
     <div>
@@ -39,13 +46,32 @@ export default function AdminPage() {
 }
 
 // ── Users ─────────────────────────────────────────────────────
+function capabilityLabels(u) {
+  const labels = []
+  if (u.can_approve) labels.push('Approval')
+  if (u.is_payroll_admin) labels.push('Payroll admin')
+  if (u.is_system_admin) labels.push('System admin')
+  return labels
+}
+
 function UsersTab() {
   const [users, setUsers] = useState([])
+  const [q, setQ] = useState('')
+  const [status, setStatus] = useState('')
+  const [capability, setCapability] = useState('')
   const [showNew, setShowNew] = useState(false)
+  const [editing, setEditing] = useState(null)
+  const [secret, setSecret] = useState(null) // { title, value } | { title, codes }
   const [error, setError] = useState('')
 
-  function load() { api.get('/admin/users').then(setUsers).catch(e => setError(e.message)) }
-  useEffect(load, [])
+  function load() {
+    const params = new URLSearchParams()
+    if (q) params.set('q', q)
+    if (status) params.set('status', status)
+    if (capability) params.set('capability', capability)
+    api.get(`/admin/users${params.toString() ? `?${params}` : ''}`).then(setUsers).catch(e => setError(e.message))
+  }
+  useEffect(load, [q, status, capability])
 
   async function unlock(id) {
     await api.post(`/admin/users/${id}/unlock-pin`).catch(e => setError(e.message))
@@ -53,6 +79,36 @@ function UsersTab() {
   }
   async function toggleActive(u) {
     await api.patch(`/admin/users/${u.id}/${u.is_active ? 'deactivate' : 'reactivate'}`).catch(e => setError(e.message))
+    load()
+  }
+  async function remove(u) {
+    if (!window.confirm(`Remove ${u.full_name}? This is reversible (Restore), and their timesheet history stays intact.`)) return
+    await api.post(`/admin/users/${u.id}/remove`).catch(e => setError(e.message))
+    load()
+  }
+  async function restore(u) {
+    await api.post(`/admin/users/${u.id}/restore`).catch(e => setError(e.message))
+    load()
+  }
+  async function resetPin(u) {
+    if (!window.confirm(`Reset ${u.full_name}'s PIN? Their current PIN stops working immediately and any active session is signed out.`)) return
+    try {
+      const r = await api.post(`/admin/users/${u.id}/reset-pin`)
+      setSecret({ title: `New PIN for ${u.full_name}`, value: r.new_pin })
+    } catch (err) { setError(err.message) }
+    load()
+  }
+  async function resetPassword(u) {
+    if (!window.confirm(`Reset ${u.full_name}'s password? Their current password stops working immediately and any active session is signed out. MFA is left untouched.`)) return
+    try {
+      const r = await api.post(`/admin/users/${u.id}/reset-password`)
+      setSecret({ title: `New password for ${u.full_name}`, value: r.new_password })
+    } catch (err) { setError(err.message) }
+    load()
+  }
+  async function resetMfa(u) {
+    if (!window.confirm(`Reset ${u.full_name}'s MFA? They'll need to re-enrol (new QR code + backup codes) next time they sign in.`)) return
+    await api.post(`/admin/users/${u.id}/reset-mfa`).catch(e => setError(e.message))
     load()
   }
 
@@ -63,21 +119,122 @@ function UsersTab() {
         <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>+ New user</button>
       </div>
       {error && <div className="banner banner-error">{error}</div>}
-      <div className="card">
-        {users.map(u => (
-          <div key={u.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid var(--border)', opacity: u.is_active ? 1 : 0.5 }}>
-            <div>
-              <div style={{ fontWeight: 600 }}>{u.full_name} <span style={{ fontWeight: 400, color: 'var(--text3)', fontSize: 13 }}>({u.role}{u.department ? `, ${u.department}` : ''})</span></div>
-              <div style={{ fontSize: 12, color: 'var(--text3)' }}>Reports to: {u.reports_to_name || '—'}</div>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {u.pin_locked_at && <button className="btn btn-danger btn-sm" onClick={() => unlock(u.id)}>Unlock PIN</button>}
-              <button className="btn btn-ghost btn-sm" onClick={() => toggleActive(u)}>{u.is_active ? 'Deactivate' : 'Reactivate'}</button>
-            </div>
-          </div>
-        ))}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+        <input className="input" placeholder="Search by name or username…" value={q} onChange={e => setQ(e.target.value)} style={{ maxWidth: 260 }} />
+        <select className="input" value={status} onChange={e => setStatus(e.target.value)} style={{ maxWidth: 160 }}>
+          <option value="">Any status</option>
+          <option value="active">Active</option>
+          <option value="frozen">Frozen</option>
+          <option value="removed">Removed</option>
+        </select>
+        <select className="input" value={capability} onChange={e => setCapability(e.target.value)} style={{ maxWidth: 200 }}>
+          <option value="">Any capability</option>
+          <option value="approval">Approval</option>
+          <option value="payroll_admin">Payroll admin</option>
+          <option value="system_admin">System admin</option>
+        </select>
       </div>
-      {showNew && <NewUserModal onClose={() => setShowNew(false)} onCreated={() => { setShowNew(false); load() }} users={users} />}
+      <div className="card">
+        {users.map(u => {
+          const sc = STATUS_COLORS[u.status]
+          return (
+            <div key={u.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+              <div>
+                <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {u.full_name}
+                  <span className="tag" style={{ background: sc.bg, color: sc.text }}>{u.status}</span>
+                  {capabilityLabels(u).map(l => (
+                    <span key={l} className="tag" style={{ background: 'var(--status-info-bg)', color: 'var(--status-info-text)' }}>{l}</span>
+                  ))}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text3)' }}>
+                  {u.username}{u.department ? ` · ${u.department}` : ''} · Reports to: {u.reports_to_name || '—'}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text3)' }}>
+                  {u.does_timesheets ? 'Has PIN' : 'No timesheet account'}
+                  {(u.is_payroll_admin || u.is_system_admin) && ` · MFA ${u.mfa_enabled ? 'enrolled' : 'not enrolled'}`}
+                  {' · Last login: '}{u.last_login_at ? new Date(u.last_login_at).toLocaleString('en-GB') : 'never'}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 340 }}>
+                <button className="btn btn-ghost btn-sm" onClick={() => setEditing(u)}>Edit</button>
+                {u.pin_locked_at && <button className="btn btn-danger btn-sm" onClick={() => unlock(u.id)}>Unlock PIN</button>}
+                {u.does_timesheets && <button className="btn btn-ghost btn-sm" onClick={() => resetPin(u)}>Reset PIN</button>}
+                {(u.is_payroll_admin || u.is_system_admin) && <button className="btn btn-ghost btn-sm" onClick={() => resetPassword(u)}>Reset password</button>}
+                {(u.is_payroll_admin || u.is_system_admin) && u.mfa_enabled && <button className="btn btn-ghost btn-sm" onClick={() => resetMfa(u)}>Reset MFA</button>}
+                {u.status !== 'removed' && (
+                  <button className="btn btn-ghost btn-sm" onClick={() => toggleActive(u)}>{u.is_active ? 'Freeze' : 'Unfreeze'}</button>
+                )}
+                {u.status === 'removed'
+                  ? <button className="btn btn-ghost btn-sm" onClick={() => restore(u)}>Restore</button>
+                  : <button className="btn btn-danger btn-sm" onClick={() => remove(u)}>Remove</button>}
+              </div>
+            </div>
+          )
+        })}
+        {users.length === 0 && <div style={{ padding: 16, color: 'var(--text3)' }}>No users match.</div>}
+      </div>
+      {showNew && (
+        <NewUserModal
+          onClose={() => setShowNew(false)}
+          onCreated={(secretResult) => { setShowNew(false); load(); if (secretResult) setSecret(secretResult) }}
+          users={users}
+        />
+      )}
+      {editing && (
+        <EditUserModal
+          user={editing}
+          onClose={() => setEditing(null)}
+          onSaved={(secretResult) => { setEditing(null); load(); if (secretResult) setSecret(secretResult) }}
+          users={users}
+        />
+      )}
+      {secret && <SecretRevealModal {...secret} onClose={() => setSecret(null)} />}
+    </div>
+  )
+}
+
+// Shows a one-time generated secret (PIN/password) or a list of backup
+// codes — never retrievable again once this closes.
+function SecretRevealModal({ title, value, codes, onClose }) {
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal">
+        <h2 style={{ fontSize: 18, marginBottom: 10 }}>{title}</h2>
+        <div className="banner banner-warn" style={{ marginBottom: 14 }}>Shown once — make sure it's passed on now, it can't be retrieved again.</div>
+        {value && (
+          <div className="card" style={{ padding: 16, fontSize: 20, fontFamily: 'monospace', textAlign: 'center', marginBottom: 14 }}>{value}</div>
+        )}
+        {codes && (
+          <div className="card" style={{ padding: 16, marginBottom: 14, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontFamily: 'monospace' }}>
+            {codes.map(c => <div key={c}>{c}</div>)}
+          </div>
+        )}
+        <button className="btn btn-primary" style={{ width: '100%' }} onClick={onClose}>Done</button>
+      </div>
+    </div>
+  )
+}
+
+function CapabilityCheckboxes({ doesTimesheets, setDoesTimesheets, canApprove, setCanApprove, isPayrollAdmin, setIsPayrollAdmin, isSystemAdmin, setIsSystemAdmin }) {
+  return (
+    <div style={{ marginBottom: 14, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input type="checkbox" checked={doesTimesheets} onChange={e => setDoesTimesheets(e.target.checked)} />
+        Does timesheets (Entry — gets a PIN)
+      </label>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input type="checkbox" checked={canApprove} onChange={e => setCanApprove(e.target.checked)} />
+        Approval (reviews/approves reports' timesheets)
+      </label>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input type="checkbox" checked={isPayrollAdmin} onChange={e => setIsPayrollAdmin(e.target.checked)} />
+        Admin — Payroll/Finance
+      </label>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input type="checkbox" checked={isSystemAdmin} onChange={e => setIsSystemAdmin(e.target.checked)} />
+        Admin — System
+      </label>
     </div>
   )
 }
@@ -86,21 +243,27 @@ function NewUserModal({ onClose, onCreated, users }) {
   const [fullName, setFullName] = useState('')
   const [username, setUsername] = useState('')
   const [department, setDepartment] = useState('')
-  const [role, setRole] = useState('employee')
+  const [doesTimesheets, setDoesTimesheets] = useState(true)
   const [employmentType, setEmploymentType] = useState('employee')
   const [reportsTo, setReportsTo] = useState('')
-  const [pin, setPin] = useState('')
+  const [canApprove, setCanApprove] = useState(false)
+  const [isPayrollAdmin, setIsPayrollAdmin] = useState(false)
+  const [isSystemAdmin, setIsSystemAdmin] = useState(false)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
   async function save() {
     setSaving(true); setError('')
     try {
-      await api.post('/admin/users', {
-        full_name: fullName, username, department: department || null, role,
-        employment_type: employmentType, reports_to: reportsTo || null, pin,
+      const r = await api.post('/admin/users', {
+        full_name: fullName, username, department: department || null,
+        employment_type: employmentType, reports_to: reportsTo || null,
+        does_timesheets: doesTimesheets, can_approve: canApprove,
+        is_payroll_admin: isPayrollAdmin, is_system_admin: isSystemAdmin,
       })
-      onCreated()
+      if (r.initial_pin) onCreated({ title: `Initial PIN for ${fullName}`, value: r.initial_pin })
+      else if (r.initial_password) onCreated({ title: `Initial password for ${fullName}`, value: r.initial_password })
+      else onCreated(null)
     } catch (err) { setError(err.message) } finally { setSaving(false) }
   }
 
@@ -115,14 +278,7 @@ function NewUserModal({ onClose, onCreated, users }) {
           <option value="">No department</option>
           {['CL', 'EL', 'IL', 'WW', 'PM'].map(d => <option key={d} value={d}>{d}</option>)}
         </select>
-        <select className="input" value={role} onChange={e => setRole(e.target.value)} style={{ marginBottom: 10 }}>
-          <option value="employee">Employee</option>
-          <option value="contractor">Contractor</option>
-          <option value="supervisor">Supervisor</option>
-          <option value="admin">Admin</option>
-          <option value="jonny">Jonny (processor)</option>
-        </select>
-        {role !== 'admin' && role !== 'jonny' && (
+        {doesTimesheets && (
           <select className="input" value={employmentType} onChange={e => setEmploymentType(e.target.value)} style={{ marginBottom: 10 }}>
             <option value="employee">Employee</option>
             <option value="contractor">Contractor</option>
@@ -132,16 +288,78 @@ function NewUserModal({ onClose, onCreated, users }) {
           <option value="">No line manager</option>
           {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
         </select>
-        {role !== 'admin' && role !== 'jonny' && (
-          <input className="input" inputMode="numeric" maxLength={6} placeholder="6-digit PIN" value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))} style={{ marginBottom: 14 }} />
-        )}
-        {(role === 'admin' || role === 'jonny') && (
-          <div className="banner banner-warn">This tier logs in with a password + authenticator app instead — set that up via the create-admin script, not here.</div>
+        <CapabilityCheckboxes
+          doesTimesheets={doesTimesheets} setDoesTimesheets={setDoesTimesheets}
+          canApprove={canApprove} setCanApprove={setCanApprove}
+          isPayrollAdmin={isPayrollAdmin} setIsPayrollAdmin={setIsPayrollAdmin}
+          isSystemAdmin={isSystemAdmin} setIsSystemAdmin={setIsSystemAdmin}
+        />
+        {(isPayrollAdmin || isSystemAdmin) && (
+          <div className="banner banner-warn" style={{ marginBottom: 14 }}>Admin tier — a password will be generated and shown once; they'll be walked through MFA enrolment (QR code + backup codes) on first sign-in.</div>
         )}
         <div style={{ display: 'flex', gap: 10 }}>
           <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" style={{ flex: 1 }} onClick={save} disabled={saving || (role !== 'admin' && role !== 'jonny' && pin.length !== 6)}>
+          <button className="btn btn-primary" style={{ flex: 1 }} onClick={save} disabled={saving || !fullName || !username}>
             {saving ? 'Saving…' : 'Create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function EditUserModal({ user, onClose, onSaved, users }) {
+  const [department, setDepartment] = useState(user.department || '')
+  const [employmentType, setEmploymentType] = useState(user.employment_type || 'employee')
+  const [reportsTo, setReportsTo] = useState(user.reports_to || '')
+  const [canApprove, setCanApprove] = useState(user.can_approve)
+  const [isPayrollAdmin, setIsPayrollAdmin] = useState(user.is_payroll_admin)
+  const [isSystemAdmin, setIsSystemAdmin] = useState(user.is_system_admin)
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  async function save() {
+    setSaving(true); setError('')
+    try {
+      const r = await api.patch(`/admin/users/${user.id}`, {
+        department: department || null, employment_type: employmentType, reports_to: reportsTo || null,
+        can_approve: canApprove, is_payroll_admin: isPayrollAdmin, is_system_admin: isSystemAdmin,
+      })
+      onSaved(r.initial_password ? { title: `Initial password for ${user.full_name}`, value: r.initial_password } : null)
+    } catch (err) { setError(err.message) } finally { setSaving(false) }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal">
+        <h2 style={{ fontSize: 18, marginBottom: 4 }}>Edit {user.full_name}</h2>
+        <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 14 }}>{user.username}</div>
+        {error && <div className="banner banner-error">{error}</div>}
+        <select className="input" value={department} onChange={e => setDepartment(e.target.value)} style={{ marginBottom: 10 }}>
+          <option value="">No department</option>
+          {['CL', 'EL', 'IL', 'WW', 'PM'].map(d => <option key={d} value={d}>{d}</option>)}
+        </select>
+        <select className="input" value={employmentType} onChange={e => setEmploymentType(e.target.value)} style={{ marginBottom: 10 }}>
+          <option value="employee">Employee</option>
+          <option value="contractor">Contractor</option>
+        </select>
+        <select className="input" value={reportsTo} onChange={e => setReportsTo(e.target.value)} style={{ marginBottom: 10 }}>
+          <option value="">No line manager</option>
+          {users.filter(u => u.id !== user.id).map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+        </select>
+        <CapabilityCheckboxes
+          doesTimesheets={user.does_timesheets} setDoesTimesheets={() => {}}
+          canApprove={canApprove} setCanApprove={setCanApprove}
+          isPayrollAdmin={isPayrollAdmin} setIsPayrollAdmin={setIsPayrollAdmin}
+          isSystemAdmin={isSystemAdmin} setIsSystemAdmin={setIsSystemAdmin}
+        />
+        <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 14, marginTop: -8 }}>
+          Does-timesheets isn't editable here — use Reset PIN to (re)issue one, there's no toggle to remove PIN access this batch.
+        </div>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" style={{ flex: 1 }} onClick={save} disabled={saving}>
+            {saving ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>

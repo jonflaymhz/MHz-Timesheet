@@ -1,13 +1,13 @@
 const express = require('express');
 const db = require('../db/pool');
-const { requireAuth, requireSupervisor } = require('../middleware/auth');
+const { requireAuth, requireApprovalAuthority } = require('../middleware/auth');
 
 const router = express.Router();
 
 // ── GET /api/team/outstanding ────────────────────────────────
 // A supervisor's own reports/freelancers who haven't submitted for a given
 // week yet (Section 6's Monday-morning routine).
-router.get('/outstanding', requireAuth, requireSupervisor, async (req, res) => {
+router.get('/outstanding', requireAuth, requireApprovalAuthority, async (req, res) => {
   const weekStart = req.query.week_start;
   if (!weekStart) return res.status(400).json({ error: 'week_start is required' });
   const result = await db.query(
@@ -23,7 +23,7 @@ router.get('/outstanding', requireAuth, requireSupervisor, async (req, res) => {
 });
 
 // A supervisor's reports, for the proxy-entry picker (Section 6).
-router.get('/reports', requireAuth, requireSupervisor, async (req, res) => {
+router.get('/reports', requireAuth, requireApprovalAuthority, async (req, res) => {
   const result = await db.query(
     `SELECT id, full_name FROM users WHERE reports_to = $1 AND is_active = TRUE ORDER BY full_name`,
     [req.user.id]
