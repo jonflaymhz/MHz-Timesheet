@@ -3,9 +3,10 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 
-// First-login enrollment for an admin-tier account with no MFA set up yet
-// (admin scope Section 4.2). Reached only via a pending-enrollment session
-// created by /auth/admin-login — see App.jsx's RequireMfaEnrollment guard.
+// First-login enrollment for an elevated-tier account with no MFA set up
+// yet (admin scope Section 4.2). Reached only via a pending-enrollment
+// session created by /auth/login-elevated — see App.jsx's
+// RequireMfaEnrollment guard.
 export default function MfaEnrollPage() {
   const { refresh, logout } = useAuth()
   const navigate = useNavigate()
@@ -40,7 +41,7 @@ export default function MfaEnrollPage() {
 
   async function cancel() {
     await logout()
-    navigate('/admin-login')
+    navigate('/login')
   }
 
   if (backupCodes) {

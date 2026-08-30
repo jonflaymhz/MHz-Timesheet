@@ -26,14 +26,42 @@ function setSessionCookie(req, res, token, expiresAt) {
 // ── GET /api/auth/kiosk-users ─────────────────────────────────
 // Name-tile list for the shared factory terminal (Section 3). Tapping a
 // tile only identifies who's about to log in — it never authenticates by
-// itself. A PIN is always required next (confirmed policy).
+// itself. A PIN is always required next (confirmed policy). Elevated-tier
+// accounts (Section 3.1) are excluded even if they hold a pin_hash — a
+// shared kiosk has no password/TOTP fields to fall back to.
 router.get('/kiosk-users', async (req, res) => {
   const result = await db.query(
     `SELECT id, full_name FROM users
       WHERE is_active = TRUE AND pin_hash IS NOT NULL AND pin_locked_at IS NULL
+        AND NOT can_approve AND NOT is_payroll_admin AND NOT is_system_admin
       ORDER BY full_name`
   );
   res.json(result.rows);
+});
+
+// One login page for everyone (Admin Scope Section 3.1) — the account's
+// capabilities decide the credential tier, not a URL the user has to find.
+// Approval and either Admin role all sit in the elevated tier (Section 3.1
+// widens this beyond just the two admin flags): username + password +
+// TOTP, same as the rest of QW. Floor accounts stay on username + PIN.
+function isElevatedTier(user) {
+  return !!(user.can_approve || user.is_payroll_admin || user.is_system_admin);
+}
+
+// ── POST /api/auth/login-tier ─────────────────────────────────
+// Lets the single login page ask "PIN or password+MFA?" before rendering
+// the right fields, without exposing whether a username exists — an
+// unknown username gets the same 'standard' answer as any real
+// non-elevated account.
+router.post('/login-tier', async (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.json({ tier: 'standard' });
+  const result = await db.query(
+    `SELECT can_approve, is_payroll_admin, is_system_admin FROM users WHERE username = $1 AND is_active = TRUE`,
+    [username]
+  );
+  const user = result.rows[0];
+  res.json({ tier: user && isElevatedTier(user) ? 'elevated' : 'standard' });
 });
 
 // ── POST /api/auth/login ──────────────────────────────────────
@@ -52,6 +80,13 @@ router.post('/login', async (req, res) => {
   const user = userResult.rows[0];
   if (!user || !user.pin_hash) {
     return res.status(401).json({ error: 'Invalid username or PIN' });
+  }
+  // Defense in depth: the login page won't offer a PIN field for an
+  // elevated-tier account, but a person can hold both a pin_hash (their own
+  // timesheet, set before being promoted) and elevated capabilities at
+  // once — the PIN must never become a live credential for that account.
+  if (isElevatedTier(user)) {
+    return res.status(401).json({ error: 'This account requires password + authenticator sign-in', tier: 'elevated' });
   }
   if (user.pin_locked_at) {
     return res.status(423).json({ error: 'Account locked after too many failed attempts. Ask an admin to unlock it.' });
@@ -72,19 +107,19 @@ router.post('/login', async (req, res) => {
   res.json({ id: user.id, full_name: user.full_name });
 });
 
-// ── POST /api/auth/admin-login ────────────────────────────────
-// Admin tier (Payroll and/or System admin): username + password + TOTP.
-// Matches "the same standard as the rest of QW" (Section 3). An account
-// that hasn't completed MFA enrollment yet (mfa_enabled false) gets a
-// short-lived pending session instead of a real one — it can only reach
-// the /mfa/enroll/* routes below until enrollment is confirmed.
-router.post('/admin-login', async (req, res) => {
+// ── POST /api/auth/login-elevated ─────────────────────────────
+// Elevated tier (Approval and/or either Admin role, Section 3.1): username
+// + password + TOTP. Matches "the same standard as the rest of QW". An
+// account that hasn't completed MFA enrollment yet (mfa_enabled false)
+// gets a short-lived pending session instead of a real one — it can only
+// reach the /mfa/enroll/* routes below until enrollment is confirmed.
+router.post('/login-elevated', async (req, res) => {
   const { username, password, totp_code } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password are required' });
   }
   const userResult = await db.query(
-    `SELECT * FROM users WHERE username = $1 AND is_active = TRUE AND (is_payroll_admin OR is_system_admin)`,
+    `SELECT * FROM users WHERE username = $1 AND is_active = TRUE AND (can_approve OR is_payroll_admin OR is_system_admin)`,
     [username]
   );
   const user = userResult.rows[0];

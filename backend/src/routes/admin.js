@@ -47,13 +47,15 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
 
 // Auto-generates the initial PIN/password rather than letting the admin
 // type one (admin scope Section 3.2) — either or both may apply, since a
-// person can be an Entry account and an admin at the same time.
+// person can be an Entry account and elevated-tier at the same time.
 router.post('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   const { full_name, username, department, employment_type, reports_to, does_timesheets, can_approve, is_payroll_admin, is_system_admin } = req.body;
   if (!full_name || !username) {
     return res.status(400).json({ error: 'full_name and username are required' });
   }
-  const isAdminTier = !!is_payroll_admin || !!is_system_admin;
+  // Elevated tier (Section 3.1): Approval and either Admin role all require
+  // password + MFA, not just the two admin flags.
+  const isElevatedTier = !!can_approve || !!is_payroll_admin || !!is_system_admin;
 
   let pinHash = null;
   let initialPin = null;
@@ -63,7 +65,7 @@ router.post('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   }
   let passwordHash = null;
   let initialPassword = null;
-  if (isAdminTier) {
+  if (isElevatedTier) {
     initialPassword = generatePassword();
     passwordHash = await bcrypt.hash(initialPassword, 10);
   }
@@ -87,12 +89,14 @@ router.patch('/users/:id', requireAuth, requireSystemAdmin, async (req, res) => 
   const before = (await db.query(`SELECT * FROM users WHERE id = $1`, [req.params.id])).rows[0];
   if (!before) return res.status(404).json({ error: 'User not found' });
 
-  const nextIsAdminTier = (is_payroll_admin ?? before.is_payroll_admin) || (is_system_admin ?? before.is_system_admin);
+  // Elevated tier (Section 3.1): Approval and either Admin role all require
+  // password + MFA, not just the two admin flags.
+  const nextIsElevatedTier = (can_approve ?? before.can_approve) || (is_payroll_admin ?? before.is_payroll_admin) || (is_system_admin ?? before.is_system_admin);
   let passwordHash = before.password_hash;
   let initialPassword = null;
-  // Bootstrapping: the first time either admin flag flips true on a row
-  // with no password yet, generate one the same way creation does.
-  if (nextIsAdminTier && !before.password_hash) {
+  // Bootstrapping: the first time the account becomes elevated-tier on a
+  // row with no password yet, generate one the same way creation does.
+  if (nextIsElevatedTier && !before.password_hash) {
     initialPassword = generatePassword();
     passwordHash = await bcrypt.hash(initialPassword, 10);
   }
@@ -241,12 +245,12 @@ router.post('/users/:id/reset-password', requireAuth, requireSystemAdmin, async 
 
 // Reset MFA (admin scope Section 4.2: "MFA cannot be disabled by the user,
 // only reset by another admin") — clears the secret and backup codes so
-// the next admin-login naturally re-enters the enrollment flow.
+// the next elevated-tier login naturally re-enters the enrollment flow.
 router.post('/users/:id/reset-mfa', requireAuth, requireSystemAdmin, async (req, res) => {
-  const existing = (await db.query(`SELECT is_payroll_admin, is_system_admin, full_name FROM users WHERE id = $1`, [req.params.id])).rows[0];
+  const existing = (await db.query(`SELECT can_approve, is_payroll_admin, is_system_admin, full_name FROM users WHERE id = $1`, [req.params.id])).rows[0];
   if (!existing) return res.status(404).json({ error: 'User not found' });
-  if (!existing.is_payroll_admin && !existing.is_system_admin) {
-    return res.status(400).json({ error: 'This account is not admin-tier' });
+  if (!existing.can_approve && !existing.is_payroll_admin && !existing.is_system_admin) {
+    return res.status(400).json({ error: 'This account is not elevated-tier' });
   }
   await db.query(`UPDATE users SET mfa_enabled = FALSE, mfa_secret = NULL WHERE id = $1`, [req.params.id]);
   await db.query(`DELETE FROM user_mfa_backup_codes WHERE user_id = $1`, [req.params.id]);

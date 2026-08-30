@@ -1,11 +1,15 @@
 import { useState, useEffect } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 
-// Standard tier: username + 6-digit PIN (Section 3). Kiosk mode swaps the
-// username field for a name-tile grid — tapping a tile only identifies who
-// you are, a PIN is still required next (confirmed policy, not a shortcut).
+// One login page for everyone (Admin Scope Section 3.1) — no separate
+// admin/Jonny front door to find. Username is entered first; the account's
+// tier (looked up via /auth/login-tier, which never reveals whether a
+// username exists — unknown usernames get the same 'standard' answer as
+// any real non-elevated account) decides whether a PIN field or a
+// password+authenticator pair appears next. Kiosk mode skips the lookup
+// entirely — the tile list only ever contains standard-tier accounts.
 export default function LoginPage() {
   const { refresh } = useAuth()
   const navigate = useNavigate()
@@ -13,8 +17,12 @@ export default function LoginPage() {
   const [kioskUsers, setKioskUsers] = useState([])
   const [selectedUsername, setSelectedUsername] = useState('')
   const [selectedName, setSelectedName] = useState('')
+
   const [username, setUsername] = useState('')
+  const [tier, setTier] = useState(null) // null (not yet looked up) | 'standard' | 'elevated'
   const [pin, setPin] = useState('')
+  const [password, setPassword] = useState('')
+  const [totpCode, setTotpCode] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -24,7 +32,27 @@ export default function LoginPage() {
     }
   }, [kioskMode])
 
-  async function submit(e) {
+  async function continueFromUsername(e) {
+    e.preventDefault()
+    if (!username) return
+    setError(''); setLoading(true)
+    try {
+      const result = await api.post('/auth/login-tier', { username })
+      setTier(result.tier)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function backToUsername() {
+    setTier(null)
+    setPin(''); setPassword(''); setTotpCode('')
+    setError('')
+  }
+
+  async function submitStandard(e) {
     e.preventDefault()
     setError(''); setLoading(true)
     try {
@@ -39,6 +67,20 @@ export default function LoginPage() {
     } catch (err) {
       setError(err.message)
       setPin('')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function submitElevated(e) {
+    e.preventDefault()
+    setError(''); setLoading(true)
+    try {
+      const result = await api.post('/auth/login-elevated', { username, password, totp_code: totpCode })
+      await refresh()
+      navigate(result.mfa_enrollment_required ? '/mfa-enroll' : '/')
+    } catch (err) {
+      setError(err.message)
     } finally {
       setLoading(false)
     }
@@ -64,6 +106,10 @@ export default function LoginPage() {
     )
   }
 
+  // Kiosk mode always goes straight to the PIN step — tile selection already
+  // identified a standard-tier account.
+  const showCredentialStep = kioskMode ? !!selectedUsername : tier !== null
+
   return (
     <div className="page" style={{ paddingTop: 60, maxWidth: 380 }}>
       <h1 style={{ textAlign: 'center', marginBottom: 30 }}>MHz Timesheets</h1>
@@ -74,31 +120,71 @@ export default function LoginPage() {
           <button className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => setSelectedUsername('')}>Not you?</button>
         </div>
       )}
-      <form onSubmit={submit}>
-        {error && <div className="banner banner-error">{error}</div>}
-        {!kioskMode && (
-          <input className="input" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} style={{ marginBottom: 12 }} autoFocus />
-        )}
-        <input
-          className="input" type="tel" inputMode="numeric" maxLength={6} placeholder="6-digit PIN"
-          value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
-          style={{ marginBottom: 16, textAlign: 'center', fontSize: 24, letterSpacing: 6 }}
-          autoFocus={kioskMode}
-        />
-        <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading || pin.length !== 6 || (!kioskMode && !username)}>
-          {loading ? 'Signing in…' : 'Sign in'}
-        </button>
-      </form>
-      <div style={{ textAlign: 'center', marginTop: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {!kioskMode && <button className="btn btn-ghost btn-sm" onClick={() => setKioskMode(true)}>Use shared factory kiosk instead</button>}
-      </div>
-      {/* Deliberately a full, ordinary button here, not a small muted link —
-          an easy-to-miss link at this spot caused real confusion in
-          practice: people typed their admin password/authenticator code
-          into the PIN box above instead of finding this. */}
-      <Link to="/admin-login" className="btn btn-ghost" style={{ width: '100%', marginTop: 16, textAlign: 'center' }}>
-        Admin or Jonny? Sign in here instead →
-      </Link>
+
+      {error && <div className="banner banner-error">{error}</div>}
+
+      {!kioskMode && !showCredentialStep && (
+        <form onSubmit={continueFromUsername}>
+          <input className="input" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} style={{ marginBottom: 16 }} autoFocus />
+          <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading || !username}>
+            {loading ? 'Checking…' : 'Continue'}
+          </button>
+        </form>
+      )}
+
+      {kioskMode && showCredentialStep && (
+        <form onSubmit={submitStandard}>
+          <input
+            className="input" type="tel" inputMode="numeric" maxLength={6} placeholder="6-digit PIN"
+            value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
+            style={{ marginBottom: 16, textAlign: 'center', fontSize: 24, letterSpacing: 6 }}
+            autoFocus
+          />
+          <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading || pin.length !== 6}>
+            {loading ? 'Signing in…' : 'Sign in'}
+          </button>
+        </form>
+      )}
+
+      {!kioskMode && showCredentialStep && tier === 'standard' && (
+        <form onSubmit={submitStandard}>
+          <div style={{ textAlign: 'center', marginBottom: 16, fontSize: 13, color: 'var(--text2)' }}>
+            {username} · <button type="button" className="btn btn-ghost btn-sm" style={{ display: 'inline', padding: 0 }} onClick={backToUsername}>not you?</button>
+          </div>
+          <input
+            className="input" type="tel" inputMode="numeric" maxLength={6} placeholder="6-digit PIN"
+            value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
+            style={{ marginBottom: 16, textAlign: 'center', fontSize: 24, letterSpacing: 6 }}
+            autoFocus
+          />
+          <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading || pin.length !== 6}>
+            {loading ? 'Signing in…' : 'Sign in'}
+          </button>
+        </form>
+      )}
+
+      {!kioskMode && showCredentialStep && tier === 'elevated' && (
+        <form onSubmit={submitElevated}>
+          <div style={{ textAlign: 'center', marginBottom: 16, fontSize: 13, color: 'var(--text2)' }}>
+            {username} · <button type="button" className="btn btn-ghost btn-sm" style={{ display: 'inline', padding: 0 }} onClick={backToUsername}>not you?</button>
+          </div>
+          <input className="input" type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} style={{ marginBottom: 12 }} autoFocus />
+          <input
+            className="input" inputMode="numeric" maxLength={6} placeholder="Authenticator code"
+            value={totpCode} onChange={e => setTotpCode(e.target.value.replace(/\D/g, ''))}
+            style={{ marginBottom: 16, textAlign: 'center', fontSize: 20, letterSpacing: 4 }}
+          />
+          <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading}>
+            {loading ? 'Signing in…' : 'Sign in'}
+          </button>
+        </form>
+      )}
+
+      {!kioskMode && !showCredentialStep && (
+        <div style={{ textAlign: 'center', marginTop: 20 }}>
+          <button className="btn btn-ghost btn-sm" onClick={() => setKioskMode(true)}>Use shared factory kiosk instead</button>
+        </div>
+      )}
     </div>
   )
 }
