@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { api } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
-import { isSystemAdmin } from '../lib/capabilities.js'
+import { isSystemAdmin, isPayrollAdmin } from '../lib/capabilities.js'
 
 const TABS = [
   { key: 'users', label: 'Users' },
@@ -12,6 +12,7 @@ const TABS = [
   { key: 'audit', label: 'Audit log' },
   { key: 'outstanding', label: 'Outstanding' },
   { key: 'health', label: 'Integration' },
+  { key: 'qwsend', label: 'Send to QW' },
 ]
 
 const STATUS_COLORS = {
@@ -24,7 +25,12 @@ export default function AdminPage() {
   const { user } = useAuth()
   const [tab, setTab] = useState('users')
   const isAdmin = isSystemAdmin(user)
-  const visibleTabs = TABS.filter(t => isAdmin || !['users', 'costcodes', 'ctp'].includes(t.key))
+  const isPayroll = isPayrollAdmin(user)
+  const visibleTabs = TABS.filter(t => {
+    if (['users', 'costcodes', 'ctp'].includes(t.key)) return isAdmin
+    if (t.key === 'qwsend') return isPayroll
+    return true
+  })
 
   return (
     <div>
@@ -42,6 +48,7 @@ export default function AdminPage() {
         {tab === 'audit' && <AuditTab />}
         {tab === 'outstanding' && <OutstandingTab />}
         {tab === 'health' && <HealthTab />}
+        {tab === 'qwsend' && isPayroll && <QwSendTab />}
       </div>
     </div>
   )
@@ -781,6 +788,94 @@ function HealthTab() {
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+// ── Send to QW (Actual Hours Feedback Design v1.0 §3) ──────────
+function QwSendTab() {
+  const [preview, setPreview] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [sending, setSending] = useState(false)
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState('')
+
+  function loadPreview() {
+    setLoading(true); setError(''); setResult(null)
+    api.get('/admin/qw-send/preview').then(setPreview).catch(e => setError(e.message)).finally(() => setLoading(false))
+  }
+
+  useEffect(() => { loadPreview() }, [])
+
+  async function send() {
+    if (!window.confirm(`Send ${preview.total_hours} hours across ${preview.by_project.length} project(s) to QW?`)) return
+    setSending(true); setError('')
+    try {
+      const r = await api.post('/admin/qw-send/commit')
+      setResult(r)
+      loadPreview()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setSending(false)
+    }
+  }
+
+  if (loading) return <div style={{ color: 'var(--text3)' }}>Loading…</div>
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, marginBottom: 6 }}>Send to QW</h2>
+      <p style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 16 }}>
+        Only approved project hours that haven't already been sent. Non-project time and CTP builds never cross — they stay in Timesheet only.
+      </p>
+      {error && <div className="banner banner-error">{error}</div>}
+
+      {result && (
+        <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>
+            {result.succeeded} sent, {result.failed} failed of {result.attempted} attempted
+          </div>
+          {result.failures.length > 0 && (
+            <div>
+              {result.failures.map(f => (
+                <div key={f.entry_id} style={{ fontSize: 13, padding: '6px 0', borderTop: '1px solid var(--border)' }}>
+                  {f.person} · {f.project || '(no project)'} · {f.entry_date} · {f.hours}h — <span style={{ color: 'var(--status-bad-text)' }}>{f.reason}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {preview && preview.total_entries === 0 && (
+        <div className="card" style={{ padding: 16, color: 'var(--text3)' }}>Nothing to send — everything approved has already gone across.</div>
+      )}
+
+      {preview && preview.total_entries > 0 && (
+        <>
+          {preview.unmapped_people.length > 0 && (
+            <div className="banner banner-warn" style={{ marginBottom: 16 }}>
+              No QW account mapping for: {preview.unmapped_people.join(', ')} — their hours will be reported as failed until this is fixed.
+            </div>
+          )}
+          <div className="card" style={{ marginBottom: 16 }}>
+            {preview.by_project.map(p => (
+              <div key={p.qw_project_number} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+                <span>{p.qw_project_number} — {p.project_name}</span>
+                <span style={{ fontWeight: 600 }}>{p.hours}h ({p.entry_count})</span>
+              </div>
+            ))}
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', fontWeight: 700 }}>
+              <span>Total</span>
+              <span>{preview.total_hours}h</span>
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={send} disabled={sending}>
+            {sending ? 'Sending…' : `Send ${preview.total_hours} hours to QW`}
+          </button>
+        </>
+      )}
     </div>
   )
 }

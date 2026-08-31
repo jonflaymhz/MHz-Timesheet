@@ -2,7 +2,6 @@ const express = require('express');
 const db = require('../db/pool');
 const { requireAuth } = require('../middleware/auth');
 const wu = require('../services/weekUtils');
-const { pushApprovedWeek } = require('../services/qwPush');
 
 const router = express.Router();
 
@@ -309,11 +308,9 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
       confirmation_text: "I've reviewed and confirm these hours as real.",
     })]
   );
-  pushApprovedWeek(week.id).catch(err => {
-    // Push failures never block the approval itself — surfaced via the
-    // integration-health screen (Section 8), not by failing this request.
-    console.error(`QW push failed for week ${week.id}:`, err.message);
-  });
+  // No automatic QW push here any more (Actual Hours Feedback Design v1.0
+  // §2) — sending is a deliberate, manual "Send to QW" batch action,
+  // Admin-Payroll-only (see admin.js's /qw-send/* routes).
   res.json(result.rows[0]);
 });
 

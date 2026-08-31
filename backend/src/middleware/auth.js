@@ -63,4 +63,15 @@ function requireApprovalAuthority(req, res, next) {
   next();
 }
 
-module.exports = { requireAuth, requireOverrideAuthority, requireSystemAdmin, requireApprovalAuthority, COOKIE_NAME };
+// "Send to QW" is bound to the Payroll/Finance role specifically (Actual
+// Hours Feedback Design v1.0 §3/§9) — Jonny and Jon today, but by role,
+// not by name. Deliberately narrower than requireOverrideAuthority: System
+// admin alone does not get this.
+function requirePayrollAdmin(req, res, next) {
+  if (!req.user?.is_payroll_admin) {
+    return res.status(403).json({ error: 'Requires payroll admin access' });
+  }
+  next();
+}
+
+module.exports = { requireAuth, requireOverrideAuthority, requireSystemAdmin, requireApprovalAuthority, requirePayrollAdmin, COOKIE_NAME };

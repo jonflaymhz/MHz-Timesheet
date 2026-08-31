@@ -1,10 +1,11 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const db = require('../db/pool');
-const { requireAuth, requireSystemAdmin, requireOverrideAuthority } = require('../middleware/auth');
+const { requireAuth, requireSystemAdmin, requireOverrideAuthority, requirePayrollAdmin } = require('../middleware/auth');
 const { hashPin, generatePin } = require('../services/pin');
 const { generatePassword } = require('../services/password');
 const { revokeAllSessionsForUser } = require('../services/session');
+const { getEligibleEntries, sendBatch } = require('../services/qwPush');
 
 const router = express.Router();
 
@@ -492,9 +493,14 @@ router.post('/entries/:id/correct', requireAuth, requireOverrideAuthority, async
   if (!existing) return res.status(404).json({ error: 'Entry not found' });
 
   // Correct changes project or category only — hours are untouched (§5).
+  // Clearing qw_sent_at/qw_send_batch_id here (Actual Hours Feedback Design
+  // v1.0 §4) is what makes a corrected entry naturally reappear in the next
+  // "Send to QW" batch, rather than needing a special case — if it was
+  // never sent, these are already NULL and this is a no-op.
   const result = await db.query(
     `UPDATE timesheet_entry
-        SET project_ref_id = $2, reason_id = $3, cost_code_id = $4, updated_at = NOW()
+        SET project_ref_id = $2, reason_id = $3, cost_code_id = $4, updated_at = NOW(),
+            qw_sent_at = NULL, qw_send_batch_id = NULL
       WHERE id = $1 RETURNING *`,
     [req.params.id, project_ref_id || null, reason_id || null, cost_code_id || existing.cost_code_id]
   );
@@ -533,8 +539,8 @@ router.post('/weeks/:id/unsubmit', requireAuth, requireOverrideAuthority, async 
 
 // Admin-tier can also apply Approve directly (Section 5) — from draft,
 // rejected, or submitted, skipping supervisor review if needed. Not from an
-// already-approved week: that's not "approving" anything, it would just
-// silently re-trigger a push with no real state change.
+// already-approved week: that's not "approving" anything, it would just be
+// a no-op state change.
 router.post('/weeks/:id/approve', requireAuth, requireOverrideAuthority, async (req, res) => {
   const week = (await db.query(`SELECT * FROM timesheet_week WHERE id = $1`, [req.params.id])).rows[0];
   if (!week) return res.status(404).json({ error: 'Week not found' });
@@ -552,8 +558,8 @@ router.post('/weeks/:id/approve', requireAuth, requireOverrideAuthority, async (
       confirmed: true, confirmation_text: "I've reviewed and confirm these hours as real.",
     })]
   );
-  const { pushApprovedWeek } = require('../services/qwPush');
-  pushApprovedWeek(req.params.id).catch(err => console.error(`QW push failed for week ${req.params.id}:`, err.message));
+  // No automatic QW push here any more (Actual Hours Feedback Design v1.0
+  // §2) — see the /qw-send/* routes below.
   res.json(result.rows[0]);
 });
 
@@ -591,6 +597,42 @@ router.get('/integration-health', requireAuth, requireOverrideAuthority, async (
       ORDER BY sync_direction, sync_type, started_at DESC`
   );
   res.json(result.rows);
+});
+
+// ── "Send to QW" (Actual Hours Feedback Design v1.0 §3) — Payroll admin
+// only, not System admin — a deliberate role split from every other
+// override route in this file. ────────────────────────────────
+router.get('/qw-send/preview', requireAuth, requirePayrollAdmin, async (req, res) => {
+  const entries = await getEligibleEntries();
+  const byProject = new Map();
+  for (const e of entries) {
+    const key = e.qw_project_number || '(no project number)';
+    if (!byProject.has(key)) {
+      byProject.set(key, { qw_project_number: e.qw_project_number, project_name: e.project_name, hours: 0, entry_count: 0 });
+    }
+    const p = byProject.get(key);
+    p.hours += Number(e.hours);
+    p.entry_count += 1;
+  }
+  res.json({
+    total_hours: entries.reduce((s, e) => s + Number(e.hours), 0),
+    total_entries: entries.length,
+    unmapped_people: [...new Set(entries.filter(e => !e.qw_user_id).map(e => e.person_name))],
+    by_project: [...byProject.values()].sort((a, b) => (a.qw_project_number || '').localeCompare(b.qw_project_number || '')),
+  });
+});
+
+router.post('/qw-send/commit', requireAuth, requirePayrollAdmin, async (req, res) => {
+  // Re-fetched fresh, not passed in from the preview — the batch that
+  // actually sends must always be exactly "whatever's eligible right now"
+  // (§3), so a commit can never send something the reviewer didn't just
+  // see, and never misses something approved in the meantime either.
+  const entries = await getEligibleEntries();
+  if (entries.length === 0) {
+    return res.status(400).json({ error: 'Nothing eligible to send' });
+  }
+  const result = await sendBatch(entries, req.user.id);
+  res.json(result);
 });
 
 module.exports = router;

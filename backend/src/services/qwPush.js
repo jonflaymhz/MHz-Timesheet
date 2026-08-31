@@ -1,25 +1,43 @@
-// Push side of the QW integration (Section 2): live at the moment of
-// approval, authenticated as a service credential, not any user session.
-
+// Push side of the QW integration — manual "Send to QW" batch (Actual
+// Hours Feedback Design v1.0), not a per-approval push any more. Only
+// approved, project-time entries (reason_id/ctp_build_id entries are
+// excluded by the INNER JOIN to project_ref) that haven't already been
+// sent are ever eligible — a correction clears qw_sent_at on just the one
+// entry it touched (see admin.js's /entries/:id/correct), which is what
+// makes an entry naturally reappear here without any special-casing.
 const db = require('../db/pool');
 
-async function pushApprovedWeek(weekId) {
-  const startedAt = new Date();
-  const entriesResult = await db.query(
+async function getEligibleEntries() {
+  const result = await db.query(
     `SELECT te.id, te.entry_date, te.hours, te.rate_at_entry, te.calculated_cost_at_entry,
-            pr.qw_project_number, cc.code AS cost_code, u.full_name AS person_name
+            pr.qw_project_number, pr.project_name, cc.code AS cost_code,
+            u.full_name AS person_name, u.qw_user_id
        FROM timesheet_entry te
        JOIN timesheet_week tw ON tw.id = te.week_id
        JOIN users u ON u.id = tw.user_id
-       LEFT JOIN project_ref pr ON pr.id = te.project_ref_id
+       JOIN project_ref pr ON pr.id = te.project_ref_id
        LEFT JOIN cost_code cc ON cc.id = te.cost_code_id
-      WHERE te.week_id = $1 AND NOT te.is_non_work_marker`,
-    [weekId]
+      WHERE tw.status = 'approved' AND te.qw_sent_at IS NULL
+      ORDER BY pr.qw_project_number, te.entry_date`
   );
+  return result.rows;
+}
 
-  const entries = entriesResult.rows.map(r => ({
+// Section 3: the preview and the commit must agree on exactly what "the
+// batch" is — both call getEligibleEntries() fresh rather than the caller
+// passing ids around, so a commit can never send something the reviewer
+// didn't just see (and never misses something approved in between either).
+async function sendBatch(entries, initiatedByUserId) {
+  const startedAt = new Date();
+  const attempted = entries.length;
+
+  const noMapping = entries.filter(e => !e.qw_user_id);
+  const sendable = entries.filter(e => e.qw_user_id);
+
+  const payloadEntries = sendable.map(r => ({
     project_number: r.qw_project_number || null,
     cost_code: r.cost_code,
+    person_id: r.qw_user_id,
     person_name: r.person_name,
     entry_date: r.entry_date,
     hours: Number(r.hours),
@@ -28,27 +46,85 @@ async function pushApprovedWeek(weekId) {
     timesheet_entry_id: r.id,
   }));
 
-  if (entries.length === 0) {
-    await logSync('push', 'approved_hours', 'success', 'Nothing to push (week has only non-work markers)', startedAt);
-    return;
+  let qwResults = [];
+  let requestError = null;
+  if (payloadEntries.length > 0) {
+    try {
+      const res = await fetch(`${process.env.QW_API_BASE_URL}/integrations/timesheet/approved-hours`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-sync-secret': process.env.QW_SYNC_SHARED_SECRET },
+        body: JSON.stringify({ entries: payloadEntries }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`QW responded ${res.status}: ${body}`);
+      }
+      const body = await res.json();
+      qwResults = body.results || [];
+    } catch (err) {
+      requestError = err.message;
+    }
   }
 
-  try {
-    const res = await fetch(`${process.env.QW_API_BASE_URL}/integrations/timesheet/approved-hours`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-sync-secret': process.env.QW_SYNC_SHARED_SECRET },
-      body: JSON.stringify({ entries }),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`QW responded ${res.status}: ${body}`);
+  // A request-level failure (QW unreachable, non-2xx with no per-entry
+  // detail) means every sendable entry failed, not just the ones QW
+  // never got to look at — treat them all as errors rather than silently
+  // leaving their outcome ambiguous.
+  const byEntryId = new Map(qwResults.map(r => [r.timesheet_entry_id, r]));
+  const succeededIds = [];
+  const failures = [];
+
+  for (const e of sendable) {
+    const r = requestError ? { status: 'error', message: requestError } : byEntryId.get(e.id);
+    if (r && (r.status === 'inserted' || r.status === 'duplicate')) {
+      succeededIds.push(e.id);
+    } else {
+      failures.push({
+        entry_id: e.id, entry_date: e.entry_date, hours: e.hours,
+        project: e.qw_project_number, person: e.person_name,
+        reason: r?.message || 'No response from QW for this entry',
+      });
     }
-    const body = await res.json();
-    await logSync('push', 'approved_hours', 'success', `${body.inserted} inserted, ${body.duplicates} already present`, startedAt);
-  } catch (err) {
-    await logSync('push', 'approved_hours', 'error', err.message, startedAt);
-    throw err;
   }
+  for (const e of noMapping) {
+    failures.push({
+      entry_id: e.id, entry_date: e.entry_date, hours: e.hours,
+      project: e.qw_project_number, person: e.person_name,
+      reason: 'No QW account mapping for this person',
+    });
+  }
+
+  const succeeded = succeededIds.length;
+  const failed = attempted - succeeded;
+
+  const batchResult = await db.query(
+    `INSERT INTO qw_send_batch (initiated_by, entries_attempted, entries_succeeded, entries_failed)
+     VALUES ($1,$2,$3,$4) RETURNING id, initiated_at`,
+    [initiatedByUserId, attempted, succeeded, failed]
+  );
+  const batch = batchResult.rows[0];
+
+  if (succeededIds.length > 0) {
+    await db.query(
+      `UPDATE timesheet_entry SET qw_sent_at = NOW(), qw_send_batch_id = $2 WHERE id = ANY($1::uuid[])`,
+      [succeededIds, batch.id]
+    );
+  }
+
+  await db.query(
+    `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by, new_value)
+     VALUES ('send_to_qw', 'qw_send_batch', $1, $2, $3)`,
+    [batch.id, initiatedByUserId, JSON.stringify({ attempted, succeeded, failed })]
+  );
+
+  await logSync(
+    'push', 'approved_hours',
+    failed === 0 ? 'success' : (succeeded === 0 ? 'error' : 'partial'),
+    `Batch ${batch.id}: ${succeeded} sent, ${failed} failed of ${attempted} attempted`,
+    startedAt
+  );
+
+  return { batch_id: batch.id, initiated_at: batch.initiated_at, attempted, succeeded, failed, failures };
 }
 
 async function logSync(direction, type, status, detail, startedAt) {
@@ -59,4 +135,4 @@ async function logSync(direction, type, status, detail, startedAt) {
   );
 }
 
-module.exports = { pushApprovedWeek };
+module.exports = { getEligibleEntries, sendBatch };
