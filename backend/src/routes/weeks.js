@@ -10,7 +10,11 @@ const router = express.Router();
 // viewing and proxy entry (Section 6). Returns the target week row, or null
 // if the requester has no standing to touch it.
 async function loadWeekWithAuthority(weekId, requester) {
-  const result = await db.query(`SELECT * FROM timesheet_week WHERE id = $1`, [weekId]);
+  const result = await db.query(
+    `SELECT tw.*, u.full_name AS owner_full_name FROM timesheet_week tw
+       JOIN users u ON u.id = tw.user_id WHERE tw.id = $1`,
+    [weekId]
+  );
   const week = result.rows[0];
   if (!week) return { week: null, allowed: false, isProxy: false };
   if (week.user_id === requester.id) return { week, allowed: true, isProxy: false };
@@ -24,7 +28,11 @@ async function loadWeekWithAuthority(weekId, requester) {
 
 async function weekWithEntries(weekId) {
   const [weekResult, entriesResult] = await Promise.all([
-    db.query(`SELECT * FROM timesheet_week WHERE id = $1`, [weekId]),
+    db.query(
+      `SELECT tw.*, u.full_name AS owner_full_name FROM timesheet_week tw
+         JOIN users u ON u.id = tw.user_id WHERE tw.id = $1`,
+      [weekId]
+    ),
     db.query(
       `SELECT te.*, pr.qw_project_number, pr.project_name, npr.name AS reason_name,
               cbt.name AS ctp_build_name,
@@ -182,6 +190,15 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
     const buildResult = await db.query(`SELECT 1 FROM ctp_build_type WHERE id = $1 AND is_active`, [ctp_build_id]);
     if (!buildResult.rows[0]) return res.status(400).json({ error: 'Unknown or inactive CTP build type' });
   }
+  if (reason_id) {
+    const reasonResult = await db.query(`SELECT name FROM non_project_reason WHERE id = $1 AND is_active`, [reason_id]);
+    if (!reasonResult.rows[0]) return res.status(400).json({ error: 'Unknown or inactive reason' });
+    // Section 6.4: "Other" reuses the existing Notes field rather than a
+    // new one — Notes stays optional for every other reason, as today.
+    if (reasonResult.rows[0].name === 'Other' && !description?.trim()) {
+      return res.status(400).json({ error: 'Notes are required when "Other" is selected' });
+    }
+  }
 
   let rate = null;
   if (cost_code_id) {
@@ -225,10 +242,13 @@ router.delete('/:id/entries/:entryId', requireAuth, async (req, res) => {
 const CONTRACTED_WEEKDAYS = [1, 2, 3, 4, 5]; // Mon-Fri
 
 router.post('/:id/submit', requireAuth, async (req, res) => {
-  const { week, allowed } = await loadWeekWithAuthority(req.params.id, req.user);
+  const { week, allowed, isProxy } = await loadWeekWithAuthority(req.params.id, req.user);
   if (!week) return res.status(404).json({ error: 'Week not found' });
   if (!allowed) return res.status(403).json({ error: 'Not authorised to submit this week' });
   if (!isEditable(week)) return res.status(400).json({ error: 'Week is already submitted or approved' });
+  // Section 10.1: the confirmation is the point, not a formality — enforced
+  // server-side so it can't be skipped by calling the API directly.
+  if (!req.body?.confirmed) return res.status(400).json({ error: 'Confirmation is required before submitting' });
 
   const { entries } = await weekWithEntries(week.id);
   const coveredDates = new Set(entries.map(e => e.entry_date));
@@ -250,6 +270,14 @@ router.post('/:id/submit', requireAuth, async (req, res) => {
     `UPDATE timesheet_week SET status = 'submitted', submitted_at = NOW() WHERE id = $1 RETURNING *`,
     [week.id]
   );
+  const confirmationText = isProxy
+    ? `I confirm these hours are accurate for ${week.owner_full_name}.`
+    : 'I confirm these hours are accurate.';
+  await db.query(
+    `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by, new_value)
+     VALUES ('submit', 'timesheet_week', $1, $2, $3)`,
+    [week.id, req.user.id, JSON.stringify({ confirmed: true, confirmation_text: confirmationText })]
+  );
   res.json(result.rows[0]);
 });
 
@@ -267,6 +295,8 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
   if (week.status !== 'submitted') {
     return res.status(400).json({ error: 'Only a submitted week can be approved' });
   }
+  // Section 10.2: same server-side enforcement as the submit confirmation.
+  if (!req.body?.confirmed) return res.status(400).json({ error: 'Confirmation is required before approving' });
   const result = await db.query(
     `UPDATE timesheet_week SET status = 'approved', approved_at = NOW(), approved_by = $2 WHERE id = $1 RETURNING *`,
     [week.id, req.user.id]
@@ -274,7 +304,10 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
   await db.query(
     `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by, new_value)
      VALUES ('approve', 'timesheet_week', $1, $2, $3)`,
-    [week.id, req.user.id, JSON.stringify({ status: 'approved' })]
+    [week.id, req.user.id, JSON.stringify({
+      status: 'approved', confirmed: true,
+      confirmation_text: "I've reviewed and confirm these hours as real.",
+    })]
   );
   pushApprovedWeek(week.id).catch(err => {
     // Push failures never block the approval itself — surfaced via the

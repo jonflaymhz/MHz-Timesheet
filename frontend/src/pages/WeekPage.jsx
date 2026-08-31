@@ -28,9 +28,11 @@ export default function WeekPage() {
   const [rejectReason, setRejectReason] = useState('')
   const [showReject, setShowReject] = useState(false)
   const [reviewing, setReviewing] = useState(false)
+  const [confirmSubmit, setConfirmSubmit] = useState(false)
+  const [confirmApprove, setConfirmApprove] = useState(false)
 
   const load = useCallback(async () => {
-    setLoading(true); setError(''); setMissing(null)
+    setLoading(true); setError(''); setMissing(null); setConfirmSubmit(false); setConfirmApprove(false)
     try {
       const path = forUserId
         ? `/weeks/for/${forUserId}${weekStartParam ? `?week_start=${weekStartParam}` : ''}`
@@ -56,7 +58,7 @@ export default function WeekPage() {
   async function submit() {
     setSubmitting(true); setError(''); setMissing(null)
     try {
-      await api.post(`/weeks/${week.id}/submit`)
+      await api.post(`/weeks/${week.id}/submit`, { confirmed: true })
       load()
     } catch (err) {
       if (err.body?.missing_dates) setMissing(err.body.missing_dates)
@@ -69,7 +71,7 @@ export default function WeekPage() {
   async function approve() {
     setReviewing(true); setError('')
     try {
-      await api.post(`/weeks/${week.id}/approve`)
+      await api.post(`/weeks/${week.id}/approve`, { confirmed: true })
       load()
     } catch (err) {
       setError(err.message)
@@ -144,16 +146,30 @@ export default function WeekPage() {
       })}
 
       {editable && (
-        <button className="btn btn-primary" style={{ width: '100%', marginTop: 8 }} onClick={submit} disabled={submitting}>
-          {submitting ? 'Submitting…' : 'Submit week for approval'}
-        </button>
+        <>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 16, fontSize: 13, color: 'var(--text2)' }}>
+            <input type="checkbox" checked={confirmSubmit} onChange={e => setConfirmSubmit(e.target.checked)} />
+            {isProxyView
+              ? `I confirm these hours are accurate for ${week.owner_full_name}.`
+              : 'I confirm these hours are accurate.'}
+          </label>
+          <button className="btn btn-primary" style={{ width: '100%', marginTop: 8 }} onClick={submit} disabled={submitting || !confirmSubmit}>
+            {submitting ? 'Submitting…' : 'Submit week for approval'}
+          </button>
+        </>
       )}
 
       {canReview && !showReject && (
-        <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
-          <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => setShowReject(true)} disabled={reviewing}>Reject</button>
-          <button className="btn btn-primary" style={{ flex: 1 }} onClick={approve} disabled={reviewing}>Approve week</button>
-        </div>
+        <>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 16, fontSize: 13, color: 'var(--text2)' }}>
+            <input type="checkbox" checked={confirmApprove} onChange={e => setConfirmApprove(e.target.checked)} />
+            I've reviewed and confirm these hours as real.
+          </label>
+          <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+            <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => setShowReject(true)} disabled={reviewing}>Reject</button>
+            <button className="btn btn-primary" style={{ flex: 1 }} onClick={approve} disabled={reviewing || !confirmApprove}>Approve week</button>
+          </div>
+        </>
       )}
       {canReview && showReject && (
         <div className="card" style={{ padding: 16, marginTop: 8 }}>

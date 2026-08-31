@@ -18,6 +18,7 @@ export default function EntryModal({ weekId, date, department, onClose, onSaved 
   const [error, setError] = useState('')
 
   const isCtpBuild = selection?.type === 'ctpBuild'
+  const isOtherReason = selection?.type === 'reason' && selection.label === 'Other'
 
   useEffect(() => {
     if (selection?.type === 'reason') {
@@ -40,6 +41,7 @@ export default function EntryModal({ weekId, date, department, onClose, onSaved 
   async function save() {
     if (!selection) { setError('Pick a project, a reason, or a CTP build'); return }
     if (!isCtpBuild && !costCodeId) { setError('Pick a cost code'); return }
+    if (isOtherReason && !description.trim()) { setError('Notes are required when "Other" is selected'); return }
     setSaving(true); setError('')
     try {
       await api.post(`/weeks/${weekId}/entries`, {
@@ -92,7 +94,7 @@ export default function EntryModal({ weekId, date, department, onClose, onSaved 
             <HourPicker value={hours} onChange={setHours} />
 
             <textarea
-              className="input" placeholder="Notes (optional)"
+              className="input" placeholder={isOtherReason ? 'Notes (required for Other)' : 'Notes (optional)'}
               value={description} onChange={e => setDescription(e.target.value)}
               style={{ marginTop: 16, minHeight: 70, resize: 'vertical' }}
             />

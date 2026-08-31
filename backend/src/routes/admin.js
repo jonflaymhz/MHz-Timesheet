@@ -539,14 +539,18 @@ router.post('/weeks/:id/approve', requireAuth, requireOverrideAuthority, async (
   const week = (await db.query(`SELECT * FROM timesheet_week WHERE id = $1`, [req.params.id])).rows[0];
   if (!week) return res.status(404).json({ error: 'Week not found' });
   if (week.status === 'approved') return res.status(400).json({ error: 'Week is already approved' });
+  // Section 10.2 applies here too — same confirmation as a supervisor's Approve.
+  if (!req.body?.confirmed) return res.status(400).json({ error: 'Confirmation is required before approving' });
   const result = await db.query(
     `UPDATE timesheet_week SET status = 'approved', approved_at = NOW(), approved_by = $2 WHERE id = $1 RETURNING *`,
     [req.params.id, req.user.id]
   );
   await db.query(
-    `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by)
-     VALUES ('approve', 'timesheet_week', $1, $2)`,
-    [req.params.id, req.user.id]
+    `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by, new_value)
+     VALUES ('approve', 'timesheet_week', $1, $2, $3)`,
+    [req.params.id, req.user.id, JSON.stringify({
+      confirmed: true, confirmation_text: "I've reviewed and confirm these hours as real.",
+    })]
   );
   const { pushApprovedWeek } = require('../services/qwPush');
   pushApprovedWeek(req.params.id).catch(err => console.error(`QW push failed for week ${req.params.id}:`, err.message));
