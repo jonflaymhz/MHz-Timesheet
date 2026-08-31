@@ -14,7 +14,7 @@ router.get('/outstanding', requireAuth, requireApprovalAuthority, async (req, re
     `SELECT u.id, u.full_name, tw.status
        FROM users u
        LEFT JOIN timesheet_week tw ON tw.user_id = u.id AND tw.week_start_date = $2
-      WHERE u.reports_to = $1 AND u.is_active = TRUE
+      WHERE u.reports_to = $1 AND u.is_active = TRUE AND u.pin_hash IS NOT NULL
       ORDER BY u.full_name`,
     [req.user.id, weekStart]
   );
@@ -22,10 +22,12 @@ router.get('/outstanding', requireAuth, requireApprovalAuthority, async (req, re
   res.json({ all: result.rows, outstanding });
 });
 
-// A supervisor's reports, for the proxy-entry picker (Section 6).
+// A supervisor's reports, for the proxy-entry picker (Section 6). Same
+// pin_hash filter as /outstanding — proxy entry is for people who need a
+// timesheet but can't submit it themselves, not for admin-only reports.
 router.get('/reports', requireAuth, requireApprovalAuthority, async (req, res) => {
   const result = await db.query(
-    `SELECT id, full_name FROM users WHERE reports_to = $1 AND is_active = TRUE ORDER BY full_name`,
+    `SELECT id, full_name FROM users WHERE reports_to = $1 AND is_active = TRUE AND pin_hash IS NOT NULL ORDER BY full_name`,
     [req.user.id]
   );
   res.json(result.rows);
