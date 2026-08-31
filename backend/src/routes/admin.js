@@ -78,7 +78,7 @@ router.post('/users', requireAuth, requireSystemAdmin, async (req, res) => {
     const result = await db.query(
       `INSERT INTO users (full_name, username, department, employment_type, reports_to, pin_hash, password_hash, can_approve, is_payroll_admin, is_system_admin)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, full_name, username`,
-      [full_name, username, department || null, employment_type || 'employee', reports_to || null,
+      [full_name, username.trim().toLowerCase(), department || null, employment_type || 'employee', reports_to || null,
         pinHash, passwordHash, !!can_approve, !!is_payroll_admin, !!is_system_admin]
     );
     res.status(201).json({ ...result.rows[0], initial_pin: initialPin, initial_password: initialPassword });
