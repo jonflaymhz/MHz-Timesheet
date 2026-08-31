@@ -125,7 +125,11 @@ export default function LoginPage() {
 
       {!kioskMode && !showCredentialStep && (
         <form onSubmit={continueFromUsername}>
-          <input className="input" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} style={{ marginBottom: 16 }} autoFocus />
+          <input
+            className="input" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)}
+            style={{ marginBottom: 16 }} autoFocus
+            autoCapitalize="none" autoCorrect="off" spellCheck="false"
+          />
           <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading || !username}>
             {loading ? 'Checking…' : 'Continue'}
           </button>

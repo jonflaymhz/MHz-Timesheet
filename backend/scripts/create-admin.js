@@ -27,7 +27,7 @@ async function main() {
     `INSERT INTO users (full_name, username, employment_type, password_hash, is_payroll_admin, is_system_admin, mfa_enabled, mfa_secret)
      VALUES ($1, $2, 'employee', $3, $4, $5, FALSE, NULL)
      RETURNING id`,
-    [fullName, username, passwordHash, isPayrollAdmin, isSystemAdmin]
+    [fullName, username.trim().toLowerCase(), passwordHash, isPayrollAdmin, isSystemAdmin]
   );
 
   console.log('\nAccount created:', result.rows[0].id);

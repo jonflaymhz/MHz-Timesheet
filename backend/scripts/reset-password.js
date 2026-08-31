@@ -17,7 +17,7 @@ async function main() {
   const passwordHash = await bcrypt.hash(password, 10);
   const result = await db.query(
     `UPDATE users SET password_hash = $2 WHERE username = $1 AND (is_payroll_admin OR is_system_admin) RETURNING id, full_name`,
-    [username, passwordHash]
+    [username.trim().toLowerCase(), passwordHash]
   );
   if (!result.rows[0]) {
     console.error(`No admin-tier user found with username '${username}'`);

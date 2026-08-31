@@ -58,7 +58,7 @@ router.post('/login-tier', async (req, res) => {
   if (!username) return res.json({ tier: 'standard' });
   const result = await db.query(
     `SELECT can_approve, is_payroll_admin, is_system_admin FROM users WHERE username = $1 AND is_active = TRUE`,
-    [username]
+    [username.trim().toLowerCase()]
   );
   const user = result.rows[0];
   res.json({ tier: user && isElevatedTier(user) ? 'elevated' : 'standard' });
@@ -75,7 +75,7 @@ router.post('/login', async (req, res) => {
   }
   const userResult = await db.query(
     `SELECT * FROM users WHERE username = $1 AND is_active = TRUE`,
-    [username]
+    [username.trim().toLowerCase()]
   );
   const user = userResult.rows[0];
   if (!user || !user.pin_hash) {
@@ -120,7 +120,7 @@ router.post('/login-elevated', async (req, res) => {
   }
   const userResult = await db.query(
     `SELECT * FROM users WHERE username = $1 AND is_active = TRUE AND (can_approve OR is_payroll_admin OR is_system_admin)`,
-    [username]
+    [username.trim().toLowerCase()]
   );
   const user = userResult.rows[0];
   if (!user || !user.password_hash) {
