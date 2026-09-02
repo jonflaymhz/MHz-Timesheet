@@ -28,6 +28,7 @@ async function requireAuth(req, res, next) {
     username: session.username,
     employment_type: session.employment_type,
     department: session.department,
+    has_ctp_access: session.has_ctp_access,
     reports_to: session.reports_to,
     can_approve: session.can_approve,
     is_payroll_admin: session.is_payroll_admin,

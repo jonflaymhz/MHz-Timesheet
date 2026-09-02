@@ -13,6 +13,7 @@ const referenceRoutes = require('./routes/reference');
 const adminRoutes = require('./routes/admin');
 const teamRoutes = require('./routes/team');
 const { runHourlySync } = require('./services/qwPull');
+const { runHourlySync: runHourlyCtpSync } = require('./services/ctpPull');
 
 const app = express();
 
@@ -55,6 +56,13 @@ http.createServer(app).listen(PORT, '127.0.0.1', () => {
 cron.schedule('0 * * * *', () => {
   runHourlySync().catch(err => console.error('Hourly QW sync failed:', err.message));
 });
-// Run once at startup too, so a freshly deployed instance isn't empty for
-// up to an hour.
+// Hourly pull — CTP builds (CTP Integration Scope Section 2, decided).
+// Same cadence as QW; a separate cron.schedule call (not folded into the
+// same tick) so a CTP outage/slow response can never delay the QW pull.
+cron.schedule('0 * * * *', () => {
+  runHourlyCtpSync().catch(err => console.error('Hourly CTP sync failed:', err.message));
+});
+// Run both once at startup too, so a freshly deployed instance isn't empty
+// for up to an hour.
 runHourlySync().catch(err => console.error('Startup QW sync failed:', err.message));
+runHourlyCtpSync().catch(err => console.error('Startup CTP sync failed:', err.message));

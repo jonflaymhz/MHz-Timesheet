@@ -6,6 +6,7 @@ const { hashPin, generatePin } = require('../services/pin');
 const { generatePassword } = require('../services/password');
 const { revokeAllSessionsForUser } = require('../services/session');
 const { getEligibleEntries, sendBatch } = require('../services/qwPush');
+const { getEligibleEntries: getEligibleCtpEntries, sendBatch: sendCtpBatch } = require('../services/ctpPush');
 
 const router = express.Router();
 
@@ -38,7 +39,7 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   const result = await db.query(
     `SELECT u.id, u.full_name, u.username, u.department, u.employment_type,
             u.reports_to, r.full_name AS reports_to_name,
-            u.can_approve, u.is_payroll_admin, u.is_system_admin,
+            u.can_approve, u.is_payroll_admin, u.is_system_admin, u.has_ctp_access,
             u.is_active, u.removed_at, u.pin_locked_at, u.mfa_enabled, u.last_login_at,
             (u.pin_hash IS NOT NULL) AS does_timesheets
        FROM users u
@@ -54,7 +55,7 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
 // type one (admin scope Section 3.2) — either or both may apply, since a
 // person can be an Entry account and elevated-tier at the same time.
 router.post('/users', requireAuth, requireSystemAdmin, async (req, res) => {
-  const { full_name, username, department, employment_type, reports_to, does_timesheets, can_approve, is_payroll_admin, is_system_admin } = req.body;
+  const { full_name, username, department, employment_type, reports_to, does_timesheets, can_approve, is_payroll_admin, is_system_admin, has_ctp_access } = req.body;
   if (!full_name || !username) {
     return res.status(400).json({ error: 'full_name and username are required' });
   }
@@ -77,10 +78,10 @@ router.post('/users', requireAuth, requireSystemAdmin, async (req, res) => {
 
   try {
     const result = await db.query(
-      `INSERT INTO users (full_name, username, department, employment_type, reports_to, pin_hash, password_hash, can_approve, is_payroll_admin, is_system_admin)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, full_name, username`,
+      `INSERT INTO users (full_name, username, department, employment_type, reports_to, pin_hash, password_hash, can_approve, is_payroll_admin, is_system_admin, has_ctp_access)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, full_name, username`,
       [full_name, username.trim().toLowerCase(), department || null, employment_type || 'employee', reports_to || null,
-        pinHash, passwordHash, !!can_approve, !!is_payroll_admin, !!is_system_admin]
+        pinHash, passwordHash, !!can_approve, !!is_payroll_admin, !!is_system_admin, !!has_ctp_access]
     );
     res.status(201).json({ ...result.rows[0], initial_pin: initialPin, initial_password: initialPassword });
   } catch (err) {
@@ -90,7 +91,7 @@ router.post('/users', requireAuth, requireSystemAdmin, async (req, res) => {
 });
 
 router.patch('/users/:id', requireAuth, requireSystemAdmin, async (req, res) => {
-  const { department, employment_type, reports_to, can_approve, is_payroll_admin, is_system_admin } = req.body;
+  const { department, employment_type, reports_to, can_approve, is_payroll_admin, is_system_admin, has_ctp_access } = req.body;
   const before = (await db.query(`SELECT * FROM users WHERE id = $1`, [req.params.id])).rows[0];
   if (!before) return res.status(404).json({ error: 'User not found' });
 
@@ -113,15 +114,16 @@ router.patch('/users/:id', requireAuth, requireSystemAdmin, async (req, res) => 
             can_approve = COALESCE($5, can_approve),
             is_payroll_admin = COALESCE($6, is_payroll_admin),
             is_system_admin = COALESCE($7, is_system_admin),
+            has_ctp_access = COALESCE($9, has_ctp_access),
             password_hash = $8,
             updated_at = NOW()
       WHERE id = $1
-      RETURNING id, full_name, department, employment_type, reports_to, can_approve, is_payroll_admin, is_system_admin`,
-    [req.params.id, department, employment_type, reports_to || null, can_approve, is_payroll_admin, is_system_admin, passwordHash]
+      RETURNING id, full_name, department, employment_type, reports_to, can_approve, is_payroll_admin, is_system_admin, has_ctp_access`,
+    [req.params.id, department, employment_type, reports_to || null, can_approve, is_payroll_admin, is_system_admin, passwordHash, has_ctp_access]
   );
 
   const changed = {};
-  for (const key of ['department', 'employment_type', 'reports_to', 'can_approve', 'is_payroll_admin', 'is_system_admin']) {
+  for (const key of ['department', 'employment_type', 'reports_to', 'can_approve', 'is_payroll_admin', 'is_system_admin', 'has_ctp_access']) {
     if (result.rows[0][key] !== before[key]) changed[key] = { old: before[key], new: result.rows[0][key] };
   }
   if (Object.keys(changed).length > 0) {
@@ -419,12 +421,14 @@ router.patch('/cost-codes/:id', requireAuth, requireSystemAdmin, async (req, res
   res.json(result.rows[0]);
 });
 
-// ── CTP device/build tracking (Section 7) ────────────────────────
-// Lightweight, admin-managed list — no QW involvement, unlike the synced
-// project/cost-code lists above. Aggregate by build/device type, not
-// serial-level (Section 9 open question).
+// ── CTP builds (CTP Integration Scope Section 3) ────────────────────
+// Populated primarily by the hourly pull from app.ctpsystems.co.uk
+// (services/ctpPull.js) — is_active is a manual admin override/kill-switch
+// on top of that, independent of synced_open (which the pull recomputes
+// every run). A manual POST still exists as a fallback for a build that
+// genuinely has no CTP-app counterpart yet (ctp_ref left null).
 router.get('/ctp-builds', requireAuth, requireSystemAdmin, async (req, res) => {
-  const result = await db.query(`SELECT * FROM ctp_build_type ORDER BY name`);
+  const result = await db.query(`SELECT * FROM ctp_build ORDER BY last_synced_at DESC NULLS LAST, name`);
   res.json(result.rows);
 });
 
@@ -432,10 +436,10 @@ router.post('/ctp-builds', requireAuth, requireSystemAdmin, async (req, res) => 
   const { name } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
   try {
-    const result = await db.query(`INSERT INTO ctp_build_type (name) VALUES ($1) RETURNING *`, [name]);
+    const result = await db.query(`INSERT INTO ctp_build (name) VALUES ($1) RETURNING *`, [name]);
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'A build type with this name already exists' });
+    if (err.code === '23505') return res.status(409).json({ error: 'A build with this name already exists' });
     throw err;
   }
 });
@@ -443,25 +447,36 @@ router.post('/ctp-builds', requireAuth, requireSystemAdmin, async (req, res) => 
 router.patch('/ctp-builds/:id', requireAuth, requireSystemAdmin, async (req, res) => {
   const { name, is_active } = req.body;
   const result = await db.query(
-    `UPDATE ctp_build_type SET name = COALESCE($2, name), is_active = COALESCE($3, is_active)
+    `UPDATE ctp_build SET name = COALESCE($2, name), is_active = COALESCE($3, is_active)
       WHERE id = $1 RETURNING *`,
     [req.params.id, name, is_active]
   );
-  if (!result.rows[0]) return res.status(404).json({ error: 'Build type not found' });
+  if (!result.rows[0]) return res.status(404).json({ error: 'Build not found' });
   res.json(result.rows[0]);
 });
 
-// Hours by device/build type (Section 7/8) — feeds back into CTP pricing.
-// Not date-filtered this batch; a to-date total is enough to see which
-// builds are cheap or expensive to make, which is the stated purpose.
+// CTP sync status (mirrors GET /admin/qw-sync-log below).
+router.get('/ctp-sync-log', requireAuth, requireSystemAdmin, async (req, res) => {
+  const result = await db.query(
+    `SELECT DISTINCT ON (sync_direction, sync_type) sync_direction, sync_type, status, detail, started_at, completed_at
+       FROM ctp_sync_log
+      ORDER BY sync_direction, sync_type, started_at DESC`
+  );
+  res.json(result.rows);
+});
+
+// Hours by build (Section 6/8) — feeds back into CTP pricing eventually via
+// CTP's own reporting; this is just a rough in-app view while that doesn't
+// exist yet. Not date-filtered this batch; a to-date total is enough to see
+// which builds are cheap or expensive to make, which is the stated purpose.
 router.get('/reports/ctp-hours', requireAuth, requireSystemAdmin, async (req, res) => {
   const result = await db.query(
-    `SELECT cbt.id, cbt.name, cbt.is_active, COALESCE(SUM(te.hours), 0) AS total_hours,
+    `SELECT cb.id, cb.name, cb.order_ref, cb.is_active, COALESCE(SUM(te.hours), 0) AS total_hours,
             COUNT(DISTINCT te.week_id) AS weeks_logged
-       FROM ctp_build_type cbt
-       LEFT JOIN timesheet_entry te ON te.ctp_build_id = cbt.id AND NOT te.is_non_work_marker
-      GROUP BY cbt.id, cbt.name, cbt.is_active
-      ORDER BY total_hours DESC, cbt.name`
+       FROM ctp_build cb
+       LEFT JOIN timesheet_entry te ON te.ctp_build_id = cb.id AND NOT te.is_non_work_marker
+      GROUP BY cb.id, cb.name, cb.order_ref, cb.is_active
+      ORDER BY total_hours DESC, cb.name`
   );
   res.json(result.rows);
 });
@@ -599,13 +614,17 @@ router.get('/integration-health', requireAuth, requireOverrideAuthority, async (
   res.json(result.rows);
 });
 
-// ── "Send to QW" (Actual Hours Feedback Design v1.0 §3) — Payroll admin
-// only, not System admin — a deliberate role split from every other
-// override route in this file. ────────────────────────────────
-router.get('/qw-send/preview', requireAuth, requirePayrollAdmin, async (req, res) => {
-  const entries = await getEligibleEntries();
+// ── "Send approved hours" (Actual Hours Feedback Design v1.0 §3, unified
+// per CTP Integration Scope §8 — one button routing each entry to QW or
+// CTP by type, not two separate screens). Payroll admin only, not System
+// admin — a deliberate role split from every other override route in this
+// file. Both destinations are previewed/committed together so Jonny sees
+// one full picture of what's about to go out. ────────────────────────
+router.get('/send-hours/preview', requireAuth, requirePayrollAdmin, async (req, res) => {
+  const [qwEntries, ctpEntries] = await Promise.all([getEligibleEntries(), getEligibleCtpEntries()]);
+
   const byProject = new Map();
-  for (const e of entries) {
+  for (const e of qwEntries) {
     const key = e.qw_project_number || '(no project number)';
     if (!byProject.has(key)) {
       byProject.set(key, { qw_project_number: e.qw_project_number, project_name: e.project_name, hours: 0, entry_count: 0 });
@@ -614,25 +633,47 @@ router.get('/qw-send/preview', requireAuth, requirePayrollAdmin, async (req, res
     p.hours += Number(e.hours);
     p.entry_count += 1;
   }
+
+  const byBuild = new Map();
+  for (const e of ctpEntries) {
+    const key = e.ctp_build_ref || '(no build ref)';
+    if (!byBuild.has(key)) {
+      byBuild.set(key, { ctp_build_ref: e.ctp_build_ref, build_name: e.build_name, order_ref: e.order_ref, hours: 0, entry_count: 0 });
+    }
+    const b = byBuild.get(key);
+    b.hours += Number(e.hours);
+    b.entry_count += 1;
+  }
+
   res.json({
-    total_hours: entries.reduce((s, e) => s + Number(e.hours), 0),
-    total_entries: entries.length,
-    unmapped_people: [...new Set(entries.filter(e => !e.qw_user_id).map(e => e.person_name))],
-    by_project: [...byProject.values()].sort((a, b) => (a.qw_project_number || '').localeCompare(b.qw_project_number || '')),
+    qw: {
+      total_hours: qwEntries.reduce((s, e) => s + Number(e.hours), 0),
+      total_entries: qwEntries.length,
+      unmapped_people: [...new Set(qwEntries.filter(e => !e.qw_user_id).map(e => e.person_name))],
+      by_project: [...byProject.values()].sort((a, b) => (a.qw_project_number || '').localeCompare(b.qw_project_number || '')),
+    },
+    ctp: {
+      total_hours: ctpEntries.reduce((s, e) => s + Number(e.hours), 0),
+      total_entries: ctpEntries.length,
+      by_build: [...byBuild.values()].sort((a, b) => (a.order_ref || '').localeCompare(b.order_ref || '')),
+    },
   });
 });
 
-router.post('/qw-send/commit', requireAuth, requirePayrollAdmin, async (req, res) => {
+router.post('/send-hours/commit', requireAuth, requirePayrollAdmin, async (req, res) => {
   // Re-fetched fresh, not passed in from the preview — the batch that
   // actually sends must always be exactly "whatever's eligible right now"
   // (§3), so a commit can never send something the reviewer didn't just
   // see, and never misses something approved in the meantime either.
-  const entries = await getEligibleEntries();
-  if (entries.length === 0) {
+  const [qwEntries, ctpEntries] = await Promise.all([getEligibleEntries(), getEligibleCtpEntries()]);
+  if (qwEntries.length === 0 && ctpEntries.length === 0) {
     return res.status(400).json({ error: 'Nothing eligible to send' });
   }
-  const result = await sendBatch(entries, req.user.id);
-  res.json(result);
+  const [qwResult, ctpResult] = await Promise.all([
+    qwEntries.length > 0 ? sendBatch(qwEntries, req.user.id) : Promise.resolve(null),
+    ctpEntries.length > 0 ? sendCtpBatch(ctpEntries, req.user.id) : Promise.resolve(null),
+  ]);
+  res.json({ qw: qwResult, ctp: ctpResult });
 });
 
 module.exports = router;

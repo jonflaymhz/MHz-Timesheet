@@ -35,7 +35,7 @@ async function getSession(token) {
   if (!token) return null;
   const result = await db.query(
     `SELECT s.*, u.id AS u_id, u.full_name, u.username, u.employment_type,
-            u.department, u.reports_to, u.is_active,
+            u.department, u.reports_to, u.is_active, u.has_ctp_access,
             u.can_approve, u.is_payroll_admin, u.is_system_admin
        FROM user_sessions s
        JOIN users u ON u.id = s.user_id

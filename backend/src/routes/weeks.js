@@ -28,18 +28,21 @@ async function loadWeekWithAuthority(weekId, requester) {
 async function weekWithEntries(weekId) {
   const [weekResult, entriesResult] = await Promise.all([
     db.query(
-      `SELECT tw.*, u.full_name AS owner_full_name FROM timesheet_week tw
+      `SELECT tw.*, u.full_name AS owner_full_name, u.department AS owner_department, u.has_ctp_access AS owner_has_ctp_access
+         FROM timesheet_week tw
          JOIN users u ON u.id = tw.user_id WHERE tw.id = $1`,
       [weekId]
     ),
     db.query(
       `SELECT te.*, pr.qw_project_number, pr.project_name, npr.name AS reason_name,
-              cbt.name AS ctp_build_name,
+              cb.name AS ctp_build_name, cb.order_ref AS ctp_build_order_ref,
+              ccat.name AS ctp_category_name, ccat.kind AS ctp_category_kind,
               cc.code AS cost_code, cc.description AS cost_code_description
          FROM timesheet_entry te
          LEFT JOIN project_ref pr ON pr.id = te.project_ref_id
          LEFT JOIN non_project_reason npr ON npr.id = te.reason_id
-         LEFT JOIN ctp_build_type cbt ON cbt.id = te.ctp_build_id
+         LEFT JOIN ctp_build cb ON cb.id = te.ctp_build_id
+         LEFT JOIN ctp_category ccat ON ccat.id = te.ctp_category_id
          LEFT JOIN cost_code cc ON cc.id = te.cost_code_id
         WHERE te.week_id = $1
         ORDER BY te.entry_date, te.created_at`,
@@ -135,7 +138,7 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
   if (!allowed) return res.status(403).json({ error: 'Not authorised to edit this week' });
   if (!isEditable(week)) return res.status(400).json({ error: 'Week is locked and cannot be edited' });
 
-  const { entry_date, project_ref_id, reason_id, ctp_build_id, cost_code_id, hours, description, is_non_work_marker } = req.body;
+  const { entry_date, project_ref_id, reason_id, ctp_build_id, ctp_category_id, cost_code_id, hours, description, is_non_work_marker } = req.body;
   if (!entry_date || entry_date < week.week_start_date || entry_date > week.week_end_date) {
     return res.status(400).json({ error: 'entry_date must fall within this week' });
   }
@@ -157,13 +160,13 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
     }
   }
 
-  const targets = [project_ref_id, reason_id, ctp_build_id].filter(Boolean);
-  if (targets.length === 0) return res.status(400).json({ error: 'One of project_ref_id, reason_id, or ctp_build_id is required' });
-  if (targets.length > 1) return res.status(400).json({ error: 'project_ref_id, reason_id, and ctp_build_id are mutually exclusive' });
-  // Section 7: a CTP entry has no cost code — CTP staff aren't in any of
-  // the 58-code catalogue's five departments, so there's no correct one
-  // to force a pick from.
-  if (!ctp_build_id && !cost_code_id) return res.status(400).json({ error: 'cost_code_id is required' });
+  const targets = [project_ref_id, reason_id, ctp_category_id].filter(Boolean);
+  if (targets.length === 0) return res.status(400).json({ error: 'One of project_ref_id, reason_id, or ctp_category_id is required' });
+  if (targets.length > 1) return res.status(400).json({ error: 'project_ref_id, reason_id, and ctp_category_id are mutually exclusive' });
+  // CTP Integration Scope Section 4: a CTP entry has no cost code at all —
+  // CTP staff aren't in any of the 58-code catalogue's five departments, so
+  // there's no correct one to force a pick from, for either CTP shape.
+  if (!ctp_category_id && !cost_code_id) return res.status(400).json({ error: 'cost_code_id is required' });
   if (!hours || hours <= 0) return res.status(400).json({ error: 'hours must be greater than zero' });
 
   if (project_ref_id) {
@@ -185,9 +188,26 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
     if (!proj.timesheet_enabled) return res.status(400).json({ error: 'This project is not yet open for timesheet entry' });
     if (!proj.visible_to_owner) return res.status(400).json({ error: 'This project is not available to this person' });
   }
-  if (ctp_build_id) {
-    const buildResult = await db.query(`SELECT 1 FROM ctp_build_type WHERE id = $1 AND is_active`, [ctp_build_id]);
-    if (!buildResult.rows[0]) return res.status(400).json({ error: 'Unknown or inactive CTP build type' });
+  if (ctp_category_id) {
+    const categoryResult = await db.query(`SELECT name, kind, requires_comment FROM ctp_category WHERE id = $1 AND is_active`, [ctp_category_id]);
+    if (!categoryResult.rows[0]) return res.status(400).json({ error: 'Unknown or inactive CTP category' });
+    const category = categoryResult.rows[0];
+    // Section 4: 'Other' is the only category in either system that forces
+    // a comment — reuses the existing Notes field, same as reason_id's
+    // 'Other' handling below.
+    if (category.requires_comment && !description?.trim()) {
+      return res.status(400).json({ error: `Notes are required when "${category.name}" is selected` });
+    }
+    if (category.kind === 'build') {
+      if (!ctp_build_id) return res.status(400).json({ error: 'ctp_build_id is required for this category' });
+      // synced_open, not just is_active — a build outside its post-ship
+      // window (Section 3) shouldn't accept new hours even if an admin
+      // hasn't gotten around to hiding it manually.
+      const buildResult = await db.query(`SELECT 1 FROM ctp_build WHERE id = $1 AND is_active AND synced_open`, [ctp_build_id]);
+      if (!buildResult.rows[0]) return res.status(400).json({ error: 'Unknown, inactive, or closed CTP build' });
+    } else if (ctp_build_id) {
+      return res.status(400).json({ error: 'ctp_build_id must not be set for a non-project CTP category' });
+    }
   }
   if (reason_id) {
     const reasonResult = await db.query(`SELECT name FROM non_project_reason WHERE id = $1 AND is_active`, [reason_id]);
@@ -214,9 +234,9 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
   try {
     const result = await db.query(
       `INSERT INTO timesheet_entry
-         (week_id, entry_date, project_ref_id, reason_id, ctp_build_id, cost_code_id, hours, description, rate_at_entry, calculated_cost_at_entry, entered_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [week.id, entry_date, project_ref_id || null, reason_id || null, ctp_build_id || null, cost_code_id || null, hours, description || null, rateAtEntry, cost, req.user.id]
+         (week_id, entry_date, project_ref_id, reason_id, ctp_build_id, ctp_category_id, cost_code_id, hours, description, rate_at_entry, calculated_cost_at_entry, entered_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [week.id, entry_date, project_ref_id || null, reason_id || null, ctp_build_id || null, ctp_category_id || null, cost_code_id || null, hours, description || null, rateAtEntry, cost, req.user.id]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {

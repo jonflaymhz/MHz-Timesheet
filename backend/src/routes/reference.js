@@ -87,13 +87,28 @@ router.get('/non-project-reasons', requireAuth, async (req, res) => {
 });
 
 // ── GET /api/reference/ctp-builds ─────────────────────────────
-// CTP device/build list (Section 7) — not gated to CTP staff here; the
-// frontend only surfaces this group on the entry form for a CTP-department
-// person, but any account seeing it (e.g. a proxy-entering supervisor)
-// should get the same list.
+// CTP build list (CTP Integration Scope Section 3) — not gated to CTP
+// staff here; the frontend only surfaces this group on the entry form for
+// a has_ctp_access person, but any account seeing it (e.g. a proxy-entering
+// supervisor) should get the same list. is_active is the manual admin
+// override; synced_open is the shipped-date window computed by the hourly
+// pull (Section 3) — a build must clear both to be selectable.
 router.get('/ctp-builds', requireAuth, async (req, res) => {
   const result = await db.query(
-    `SELECT id, name FROM ctp_build_type WHERE is_active = TRUE ORDER BY name`
+    `SELECT id, name, order_ref, customer, sku FROM ctp_build
+      WHERE is_active = TRUE AND synced_open = TRUE
+      ORDER BY order_ref, name`
+  );
+  res.json(result.rows);
+});
+
+// ── GET /api/reference/ctp-categories ─────────────────────────
+// CTP's own category list (Section 4) — entirely separate from
+// non_project_reason and cost_code, no overlap even where a name looks
+// similar (MHz 'Sickness' vs CTP 'Sick').
+router.get('/ctp-categories', requireAuth, async (req, res) => {
+  const result = await db.query(
+    `SELECT id, name, kind, requires_comment FROM ctp_category WHERE is_active = TRUE ORDER BY kind, name`
   );
   res.json(result.rows);
 });

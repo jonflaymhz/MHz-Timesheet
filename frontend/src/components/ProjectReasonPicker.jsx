@@ -3,14 +3,20 @@ import { api } from '../lib/api.js'
 
 // Shows 3-4 recently-used projects by default, a search box to narrow the
 // full list, non-project reasons as a separate, always-visible group
-// (Section 6), and — for CTP staff only — a CTP device/build group
-// (Admin Scope Section 7). showCtpBuilds is keyed off the entry's owner
-// department, not the logged-in viewer's, so a supervisor proxy-entering
-// for a CTP contractor still sees it.
-export default function ProjectReasonPicker({ value, onSelect, showCtpBuilds }) {
+// (Section 6), and — for CTP-access staff only — CTP builds plus CTP's own
+// category list (MHz_Timesheet_CTP_Integration_Scope_v1.0 Sections 3/4).
+// showCtp is keyed off the entry's owner (has_ctp_access), not the logged-in
+// viewer's, so a supervisor proxy-entering for a CTP person still sees it.
+//
+// A CTP entry is one of two shapes: pick a build then a build-linked
+// category (PaP/Mill/Build/Test/Ship), or pick a non-project CTP category
+// (Personal/Cleaning/.../Holiday/Sick) with no build at all — mirroring how
+// project time and reason time are two separate shapes above it.
+export default function ProjectReasonPicker({ value, onSelect, showCtp }) {
   const [recent, setRecent] = useState([])
   const [reasons, setReasons] = useState([])
   const [ctpBuilds, setCtpBuilds] = useState([])
+  const [ctpCategories, setCtpCategories] = useState([])
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState(null)
   const [showAll, setShowAll] = useState(false)
@@ -19,8 +25,11 @@ export default function ProjectReasonPicker({ value, onSelect, showCtpBuilds }) 
   useEffect(() => {
     api.get('/reference/projects?recent=1').then(setRecent).catch(() => {})
     api.get('/reference/non-project-reasons').then(setReasons).catch(() => {})
-    if (showCtpBuilds) api.get('/reference/ctp-builds').then(setCtpBuilds).catch(() => {})
-  }, [showCtpBuilds])
+    if (showCtp) {
+      api.get('/reference/ctp-builds').then(setCtpBuilds).catch(() => {})
+      api.get('/reference/ctp-categories').then(setCtpCategories).catch(() => {})
+    }
+  }, [showCtp])
 
   useEffect(() => {
     if (search.trim().length < 2) { setSearchResults(null); return }
@@ -35,6 +44,32 @@ export default function ProjectReasonPicker({ value, onSelect, showCtpBuilds }) 
   }
 
   const projectList = searchResults ?? (showAll ? allProjects : recent)
+  const buildCategories = ctpCategories.filter(c => c.kind === 'build')
+  const nonProjectCtpCategories = ctpCategories.filter(c => c.kind === 'non_project')
+
+  const selectedBuildId = value?.type === 'ctpBuild' ? value.buildId : null
+  const selectedBuild = ctpBuilds.find(b => b.id === selectedBuildId)
+
+  function pickBuild(b) {
+    // Keep the already-picked category if there is one — switching which
+    // build the same category applies to is a common correction.
+    const categoryId = value?.type === 'ctpBuild' ? value.categoryId : null
+    const category = buildCategories.find(c => c.id === categoryId)
+    onSelect({
+      type: 'ctpBuild', buildId: b.id, categoryId,
+      label: category ? `${b.order_ref || b.name} · ${category.name}` : (b.order_ref || b.name),
+      requiresComment: !!category?.requires_comment,
+    })
+  }
+
+  function pickBuildCategory(c) {
+    if (!selectedBuildId) return
+    onSelect({
+      type: 'ctpBuild', buildId: selectedBuildId, categoryId: c.id,
+      label: `${selectedBuild?.order_ref || selectedBuild?.name} · ${c.name}`,
+      requiresComment: !!c.requires_comment,
+    })
+  }
 
   return (
     <div>
@@ -84,7 +119,7 @@ export default function ProjectReasonPicker({ value, onSelect, showCtpBuilds }) 
         ))}
       </div>
 
-      {showCtpBuilds && ctpBuilds.length > 0 && (
+      {showCtp && ctpBuilds.length > 0 && (
         <>
           <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '14px 0 8px' }}>
             CTP build
@@ -95,12 +130,58 @@ export default function ProjectReasonPicker({ value, onSelect, showCtpBuilds }) 
                 key={b.id}
                 className="btn btn-sm"
                 style={{
-                  background: value?.type === 'ctpBuild' && value.id === b.id ? 'var(--accent)' : 'var(--bg3)',
-                  color: value?.type === 'ctpBuild' && value.id === b.id ? '#fff' : 'var(--text)',
+                  background: selectedBuildId === b.id ? 'var(--accent)' : 'var(--bg3)',
+                  color: selectedBuildId === b.id ? '#fff' : 'var(--text)',
                 }}
-                onClick={() => onSelect({ type: 'ctpBuild', id: b.id, label: b.name })}
+                onClick={() => pickBuild(b)}
               >
-                {b.name}
+                {b.order_ref || b.name} — {b.name}
+              </button>
+            ))}
+          </div>
+
+          {selectedBuildId && (
+            <>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '12px 0 8px' }}>
+                What on this build?
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {buildCategories.map(c => (
+                  <button
+                    key={c.id}
+                    className="btn btn-sm"
+                    style={{
+                      background: value?.type === 'ctpBuild' && value.categoryId === c.id ? 'var(--accent)' : 'var(--bg3)',
+                      color: value?.type === 'ctpBuild' && value.categoryId === c.id ? '#fff' : 'var(--text)',
+                    }}
+                    onClick={() => pickBuildCategory(c)}
+                  >
+                    {c.name}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      {showCtp && nonProjectCtpCategories.length > 0 && (
+        <>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '14px 0 8px' }}>
+            CTP — not build work
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {nonProjectCtpCategories.map(c => (
+              <button
+                key={c.id}
+                className="btn btn-sm"
+                style={{
+                  background: value?.type === 'ctpCategory' && value.categoryId === c.id ? 'var(--accent)' : 'var(--bg3)',
+                  color: value?.type === 'ctpCategory' && value.categoryId === c.id ? '#fff' : 'var(--text)',
+                }}
+                onClick={() => onSelect({ type: 'ctpCategory', categoryId: c.id, label: c.name, requiresComment: !!c.requires_comment })}
+              >
+                {c.name}
               </button>
             ))}
           </div>

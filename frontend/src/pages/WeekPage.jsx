@@ -137,7 +137,8 @@ export default function WeekPage() {
             label={`${weekdayName(date)} ${dayOfMonth(date)}`}
             entries={entries.filter(e => e.entry_date === date)}
             weekId={week.id}
-            department={user?.department}
+            department={week.owner_department}
+            hasCtpAccess={week.owner_has_ctp_access}
             editable={editable}
             weekOwnerId={week.user_id}
             onRefresh={load}

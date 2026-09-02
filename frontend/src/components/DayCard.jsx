@@ -8,7 +8,7 @@ function fmtHours(h) {
 
 // Whole week always visible, running total per day (Section 6) — this is
 // one day of that week.
-export default function DayCard({ date, label, entries, weekId, department, editable, weekOwnerId, onRefresh }) {
+export default function DayCard({ date, label, entries, weekId, department, hasCtpAccess, editable, weekOwnerId, onRefresh }) {
   const [showAdd, setShowAdd] = useState(false)
   const total = entries.reduce((sum, e) => sum + Number(e.hours), 0)
   const marker = entries.find(e => e.is_non_work_marker)
@@ -42,9 +42,9 @@ export default function DayCard({ date, label, entries, weekId, department, edit
         <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderTop: '1px solid var(--border)' }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontWeight: 500, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {e.project_name || e.reason_name || e.ctp_build_name}
+              {e.project_name || e.reason_name || (e.ctp_build_name ? `${e.ctp_build_order_ref || e.ctp_build_name} · ${e.ctp_category_name}` : e.ctp_category_name)}
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text3)' }}>{e.cost_code || 'CTP build'}
+            <div style={{ fontSize: 12, color: 'var(--text3)' }}>{e.cost_code || 'CTP'}
               {weekOwnerId && e.entered_by !== weekOwnerId && <span style={{ color: 'var(--amber)', fontWeight: 600 }}> · proxy</span>}
             </div>
           </div>
@@ -68,7 +68,7 @@ export default function DayCard({ date, label, entries, weekId, department, edit
 
       {showAdd && (
         <EntryModal
-          weekId={weekId} date={date} department={department}
+          weekId={weekId} date={date} department={department} hasCtpAccess={hasCtpAccess}
           onClose={() => setShowAdd(false)}
           onSaved={onRefresh}
         />

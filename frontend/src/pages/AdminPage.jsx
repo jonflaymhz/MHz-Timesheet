@@ -12,7 +12,7 @@ const TABS = [
   { key: 'audit', label: 'Audit log' },
   { key: 'outstanding', label: 'Outstanding' },
   { key: 'health', label: 'Integration' },
-  { key: 'qwsend', label: 'Send to QW' },
+  { key: 'sendhours', label: 'Send approved hours' },
 ]
 
 const STATUS_COLORS = {
@@ -28,7 +28,7 @@ export default function AdminPage() {
   const isPayroll = isPayrollAdmin(user)
   const visibleTabs = TABS.filter(t => {
     if (['users', 'costcodes', 'ctp'].includes(t.key)) return isAdmin
-    if (t.key === 'qwsend') return isPayroll
+    if (t.key === 'sendhours') return isPayroll
     return true
   })
 
@@ -48,7 +48,7 @@ export default function AdminPage() {
         {tab === 'audit' && <AuditTab />}
         {tab === 'outstanding' && <OutstandingTab />}
         {tab === 'health' && <HealthTab />}
-        {tab === 'qwsend' && isPayroll && <QwSendTab />}
+        {tab === 'sendhours' && isPayroll && <SendHoursTab />}
       </div>
     </div>
   )
@@ -60,6 +60,7 @@ function capabilityLabels(u) {
   if (u.can_approve) labels.push('Approval')
   if (u.is_payroll_admin) labels.push('Payroll admin')
   if (u.is_system_admin) labels.push('System admin')
+  if (u.has_ctp_access) labels.push('CTP access')
   return labels
 }
 
@@ -258,6 +259,7 @@ function NewUserModal({ onClose, onCreated, users }) {
   const [canApprove, setCanApprove] = useState(false)
   const [isPayrollAdmin, setIsPayrollAdmin] = useState(false)
   const [isSystemAdmin, setIsSystemAdmin] = useState(false)
+  const [hasCtpAccess, setHasCtpAccess] = useState(false)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -269,6 +271,7 @@ function NewUserModal({ onClose, onCreated, users }) {
         employment_type: employmentType, reports_to: reportsTo || null,
         does_timesheets: doesTimesheets, can_approve: canApprove,
         is_payroll_admin: isPayrollAdmin, is_system_admin: isSystemAdmin,
+        has_ctp_access: hasCtpAccess,
       })
       if (r.initial_pin) onCreated({ title: `Initial PIN for ${fullName}`, value: r.initial_pin })
       else if (r.initial_password) onCreated({ title: `Initial password for ${fullName}`, value: r.initial_password })
@@ -303,6 +306,10 @@ function NewUserModal({ onClose, onCreated, users }) {
           isPayrollAdmin={isPayrollAdmin} setIsPayrollAdmin={setIsPayrollAdmin}
           isSystemAdmin={isSystemAdmin} setIsSystemAdmin={setIsSystemAdmin}
         />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, fontSize: 14 }}>
+          <input type="checkbox" checked={hasCtpAccess} onChange={e => setHasCtpAccess(e.target.checked)} />
+          CTP access — can log time to CTP builds
+        </label>
         {(isPayrollAdmin || isSystemAdmin) && (
           <div className="banner banner-warn" style={{ marginBottom: 14 }}>Admin tier — a password will be generated and shown once; they'll be walked through MFA enrolment (QR code + backup codes) on first sign-in.</div>
         )}
@@ -324,6 +331,7 @@ function EditUserModal({ user, onClose, onSaved, users }) {
   const [canApprove, setCanApprove] = useState(user.can_approve)
   const [isPayrollAdmin, setIsPayrollAdmin] = useState(user.is_payroll_admin)
   const [isSystemAdmin, setIsSystemAdmin] = useState(user.is_system_admin)
+  const [hasCtpAccess, setHasCtpAccess] = useState(user.has_ctp_access)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -333,6 +341,7 @@ function EditUserModal({ user, onClose, onSaved, users }) {
       const r = await api.patch(`/admin/users/${user.id}`, {
         department: department || null, employment_type: employmentType, reports_to: reportsTo || null,
         can_approve: canApprove, is_payroll_admin: isPayrollAdmin, is_system_admin: isSystemAdmin,
+        has_ctp_access: hasCtpAccess,
       })
       onSaved(r.initial_password ? { title: `Initial password for ${user.full_name}`, value: r.initial_password } : null)
     } catch (err) { setError(err.message) } finally { setSaving(false) }
@@ -362,6 +371,10 @@ function EditUserModal({ user, onClose, onSaved, users }) {
           isPayrollAdmin={isPayrollAdmin} setIsPayrollAdmin={setIsPayrollAdmin}
           isSystemAdmin={isSystemAdmin} setIsSystemAdmin={setIsSystemAdmin}
         />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, fontSize: 14 }}>
+          <input type="checkbox" checked={hasCtpAccess} onChange={e => setHasCtpAccess(e.target.checked)} />
+          CTP access — can log time to CTP builds
+        </label>
         <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 14, marginTop: -8 }}>
           Does-timesheets isn't editable here — use Reset PIN to (re)issue one, there's no toggle to remove PIN access this batch.
         </div>
@@ -492,16 +505,22 @@ function ProjectVisibilityModal({ project, onClose }) {
   )
 }
 
-// ── CTP device/build tracking (Section 7) ────────────────────────
+// ── CTP builds (CTP Integration Scope Section 3) ────────────────────
+// Populated primarily by the hourly pull from app.ctpsystems.co.uk; the
+// manual Add below is a fallback for a build with no CTP-app counterpart
+// yet. is_active is a manual kill-switch independent of the sync's own
+// open/closed (post-ship-window) judgement, shown alongside it.
 function CtpBuildsTab() {
   const [builds, setBuilds] = useState([])
   const [report, setReport] = useState([])
+  const [syncLog, setSyncLog] = useState([])
   const [newName, setNewName] = useState('')
   const [error, setError] = useState('')
 
   function load() {
     api.get('/admin/ctp-builds').then(setBuilds).catch(e => setError(e.message))
     api.get('/admin/reports/ctp-hours').then(setReport).catch(() => {})
+    api.get('/admin/ctp-sync-log').then(setSyncLog).catch(() => {})
   }
   useEffect(load, [])
 
@@ -519,27 +538,38 @@ function CtpBuildsTab() {
 
   return (
     <div>
-      <h2 style={{ fontSize: 17, marginBottom: 14 }}>CTP device/build types</h2>
+      <h2 style={{ fontSize: 17, marginBottom: 6 }}>CTP builds</h2>
+      {syncLog.map(s => (
+        <p key={s.sync_type} style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 4 }}>
+          Last {s.sync_type} {s.sync_direction}: {s.status} — {s.detail} ({new Date(s.started_at).toLocaleString('en-GB')})
+        </p>
+      ))}
       {error && <div className="banner banner-error">{error}</div>}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
-        <input className="input" placeholder="New build/device type name…" value={newName} onChange={e => setNewName(e.target.value)} style={{ maxWidth: 320 }} />
+      <div style={{ display: 'flex', gap: 8, margin: '14px 0' }}>
+        <input className="input" placeholder="Manually add a build with no CTP-app counterpart…" value={newName} onChange={e => setNewName(e.target.value)} style={{ maxWidth: 320 }} />
         <button className="btn btn-primary btn-sm" onClick={add} disabled={!newName.trim()}>Add</button>
       </div>
       <div className="card" style={{ marginBottom: 24 }}>
         {builds.map(b => (
           <div key={b.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border)' }}>
-            <span style={{ opacity: b.is_active ? 1 : 0.5 }}>{b.name}</span>
+            <div style={{ opacity: b.is_active ? 1 : 0.5 }}>
+              <div style={{ fontWeight: 600 }}>{b.order_ref ? `${b.order_ref} — ${b.name}` : b.name}</div>
+              <div style={{ fontSize: 12, color: 'var(--text3)' }}>
+                {b.customer ? `${b.customer} · ` : ''}{b.despatch_status || (b.ctp_ref ? '' : 'Manually added')}
+                {!b.synced_open && b.ctp_ref && ' · closed (past ship window)'}
+              </div>
+            </div>
             <button className="btn btn-ghost btn-sm" onClick={() => toggleActive(b)}>{b.is_active ? 'Deactivate' : 'Reactivate'}</button>
           </div>
         ))}
-        {builds.length === 0 && <div style={{ padding: 16, color: 'var(--text3)' }}>No build types yet.</div>}
+        {builds.length === 0 && <div style={{ padding: 16, color: 'var(--text3)' }}>No builds yet.</div>}
       </div>
 
-      <h2 style={{ fontSize: 17, marginBottom: 14 }}>Hours by build type</h2>
+      <h2 style={{ fontSize: 17, marginBottom: 14 }}>Hours by build</h2>
       <div className="card">
         {report.map(r => (
           <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border)' }}>
-            <span style={{ opacity: r.is_active ? 1 : 0.5 }}>{r.name}{!r.is_active && ' (inactive)'}</span>
+            <span style={{ opacity: r.is_active ? 1 : 0.5 }}>{r.order_ref ? `${r.order_ref} — ${r.name}` : r.name}{!r.is_active && ' (inactive)'}</span>
             <span style={{ fontWeight: 600 }}>{Number(r.total_hours)} hrs</span>
           </div>
         ))}
@@ -792,8 +822,10 @@ function HealthTab() {
   )
 }
 
-// ── Send to QW (Actual Hours Feedback Design v1.0 §3) ──────────
-function QwSendTab() {
+// ── Send approved hours (Actual Hours Feedback Design v1.0 §3, unified per
+// CTP Integration Scope §8) — one button, routes each entry to QW or CTP by
+// type rather than two separate screens. ──────────────────
+function SendHoursTab() {
   const [preview, setPreview] = useState(null)
   const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
@@ -802,16 +834,19 @@ function QwSendTab() {
 
   function loadPreview() {
     setLoading(true); setError(''); setResult(null)
-    api.get('/admin/qw-send/preview').then(setPreview).catch(e => setError(e.message)).finally(() => setLoading(false))
+    api.get('/admin/send-hours/preview').then(setPreview).catch(e => setError(e.message)).finally(() => setLoading(false))
   }
 
   useEffect(() => { loadPreview() }, [])
 
+  const totalHours = (preview?.qw.total_hours || 0) + (preview?.ctp.total_hours || 0)
+  const totalEntries = (preview?.qw.total_entries || 0) + (preview?.ctp.total_entries || 0)
+
   async function send() {
-    if (!window.confirm(`Send ${preview.total_hours} hours across ${preview.by_project.length} project(s) to QW?`)) return
+    if (!window.confirm(`Send ${totalHours} hours (${preview.qw.total_hours}h to QW, ${preview.ctp.total_hours}h to CTP)?`)) return
     setSending(true); setError('')
     try {
-      const r = await api.post('/admin/qw-send/commit')
+      const r = await api.post('/admin/send-hours/commit')
       setResult(r)
       loadPreview()
     } catch (err) {
@@ -825,22 +860,34 @@ function QwSendTab() {
 
   return (
     <div>
-      <h2 style={{ fontSize: 17, marginBottom: 6 }}>Send to QW</h2>
+      <h2 style={{ fontSize: 17, marginBottom: 6 }}>Send approved hours</h2>
       <p style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 16 }}>
-        Only approved project hours that haven't already been sent. Non-project time and CTP builds never cross — they stay in Timesheet only.
+        Approved hours not yet sent — project time goes to QW, build-linked CTP time goes to CTP. Non-project time and non-build CTP time never cross — they stay in Timesheet only.
       </p>
       {error && <div className="banner banner-error">{error}</div>}
 
       {result && (
         <div className="card" style={{ padding: 16, marginBottom: 16 }}>
-          <div style={{ fontWeight: 700, marginBottom: 8 }}>
-            {result.succeeded} sent, {result.failed} failed of {result.attempted} attempted
-          </div>
-          {result.failures.length > 0 && (
-            <div>
-              {result.failures.map(f => (
+          {result.qw && (
+            <div style={{ marginBottom: result.ctp ? 12 : 0 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>
+                QW: {result.qw.succeeded} sent, {result.qw.failed} failed of {result.qw.attempted} attempted
+              </div>
+              {result.qw.failures.map(f => (
                 <div key={f.entry_id} style={{ fontSize: 13, padding: '6px 0', borderTop: '1px solid var(--border)' }}>
                   {f.person} · {f.project || '(no project)'} · {f.entry_date} · {f.hours}h — <span style={{ color: 'var(--status-bad-text)' }}>{f.reason}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {result.ctp && (
+            <div>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>
+                CTP: {result.ctp.succeeded} sent, {result.ctp.failed} failed of {result.ctp.attempted} attempted
+              </div>
+              {result.ctp.failures.map(f => (
+                <div key={f.entry_id} style={{ fontSize: 13, padding: '6px 0', borderTop: '1px solid var(--border)' }}>
+                  {f.person} · {f.build || '(no build)'} · {f.entry_date} · {f.hours}h — <span style={{ color: 'var(--status-bad-text)' }}>{f.reason}</span>
                 </div>
               ))}
             </div>
@@ -848,31 +895,56 @@ function QwSendTab() {
         </div>
       )}
 
-      {preview && preview.total_entries === 0 && (
+      {preview && totalEntries === 0 && (
         <div className="card" style={{ padding: 16, color: 'var(--text3)' }}>Nothing to send — everything approved has already gone across.</div>
       )}
 
-      {preview && preview.total_entries > 0 && (
+      {preview && totalEntries > 0 && (
         <>
-          {preview.unmapped_people.length > 0 && (
+          {preview.qw.unmapped_people.length > 0 && (
             <div className="banner banner-warn" style={{ marginBottom: 16 }}>
-              No QW account mapping for: {preview.unmapped_people.join(', ')} — their hours will be reported as failed until this is fixed.
+              No QW account mapping for: {preview.qw.unmapped_people.join(', ')} — their hours will be reported as failed until this is fixed.
             </div>
           )}
-          <div className="card" style={{ marginBottom: 16 }}>
-            {preview.by_project.map(p => (
-              <div key={p.qw_project_number} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
-                <span>{p.qw_project_number} — {p.project_name}</span>
-                <span style={{ fontWeight: 600 }}>{p.hours}h ({p.entry_count})</span>
+
+          {preview.qw.total_entries > 0 && (
+            <>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>To QW — by project</div>
+              <div className="card" style={{ marginBottom: 16 }}>
+                {preview.qw.by_project.map(p => (
+                  <div key={p.qw_project_number} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+                    <span>{p.qw_project_number} — {p.project_name}</span>
+                    <span style={{ fontWeight: 600 }}>{p.hours}h ({p.entry_count})</span>
+                  </div>
+                ))}
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', fontWeight: 700 }}>
+                  <span>Total</span>
+                  <span>{preview.qw.total_hours}h</span>
+                </div>
               </div>
-            ))}
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', fontWeight: 700 }}>
-              <span>Total</span>
-              <span>{preview.total_hours}h</span>
-            </div>
-          </div>
+            </>
+          )}
+
+          {preview.ctp.total_entries > 0 && (
+            <>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>To CTP — by build</div>
+              <div className="card" style={{ marginBottom: 16 }}>
+                {preview.ctp.by_build.map(b => (
+                  <div key={b.ctp_build_ref} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+                    <span>{b.order_ref} — {b.build_name}</span>
+                    <span style={{ fontWeight: 600 }}>{b.hours}h ({b.entry_count})</span>
+                  </div>
+                ))}
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', fontWeight: 700 }}>
+                  <span>Total</span>
+                  <span>{preview.ctp.total_hours}h</span>
+                </div>
+              </div>
+            </>
+          )}
+
           <button className="btn btn-primary" onClick={send} disabled={sending}>
-            {sending ? 'Sending…' : `Send ${preview.total_hours} hours to QW`}
+            {sending ? 'Sending…' : `Send ${totalHours} hours`}
           </button>
         </>
       )}
