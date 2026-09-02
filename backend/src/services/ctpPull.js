@@ -54,8 +54,13 @@ function isOpen(b) {
   return ageDays <= SHIP_WINDOW_DAYS;
 }
 
+// Grouped by SKU, not product description — "DIO1616MA-XLR (2RU)" is the
+// actual unit-type identity; two different SKUs can share a near-identical
+// product description, and CTP's own Whiteboard grouping by product alone
+// (renderWhiteboard() in ctp-systems.html) would silently merge those. Falls
+// back to product only for the rare accessory/fee line with no sku at all.
 function groupKey(b) {
-  return `${b.orderRef}::${b.product}`;
+  return `${b.orderRef}::${b.sku || b.product}`;
 }
 
 async function pullBuilds() {

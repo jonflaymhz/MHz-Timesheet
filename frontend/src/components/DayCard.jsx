@@ -43,7 +43,7 @@ export default function DayCard({ date, label, entries, weekId, department, hasC
           <div style={{ minWidth: 0 }}>
             <div style={{ fontWeight: 500, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {e.project_name || e.reason_name || (e.ctp_build_name
-                ? `${e.ctp_build_order_ref || e.ctp_build_name}${e.ctp_build_customer ? ' / ' + e.ctp_build_customer : ''} · ${e.ctp_category_name}`
+                ? `${e.ctp_build_sku || e.ctp_build_name} / ${e.ctp_build_order_ref}${e.ctp_build_customer ? ' / ' + e.ctp_build_customer : ''} · ${e.ctp_category_name}`
                 : e.ctp_category_name)}
             </div>
             <div style={{ fontSize: 12, color: 'var(--text3)' }}>{e.cost_code || 'CTP'}

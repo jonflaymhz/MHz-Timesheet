@@ -553,7 +553,7 @@ function CtpBuildsTab() {
         {builds.map(b => (
           <div key={b.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border)' }}>
             <div style={{ opacity: b.is_active ? 1 : 0.5 }}>
-              <div style={{ fontWeight: 600 }}>{b.qty_open > 1 ? `${b.qty_open} x ` : ''}{b.name}{b.order_ref ? ` / ${b.order_ref}` : ''}</div>
+              <div style={{ fontWeight: 600 }}>{b.qty_open > 1 ? `${b.qty_open} x ` : ''}{b.sku || b.name}{b.order_ref ? ` / ${b.order_ref}` : ''}</div>
               <div style={{ fontSize: 12, color: 'var(--text3)' }}>
                 {b.customer || (b.ctp_ref ? '' : 'Manually added')}
                 {!b.synced_open && b.ctp_ref && ' · closed (past ship window)'}
@@ -569,7 +569,7 @@ function CtpBuildsTab() {
       <div className="card">
         {report.map(r => (
           <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border)' }}>
-            <span style={{ opacity: r.is_active ? 1 : 0.5 }}>{r.order_ref ? `${r.order_ref} — ${r.name}` : r.name}{!r.is_active && ' (inactive)'}</span>
+            <span style={{ opacity: r.is_active ? 1 : 0.5 }}>{r.order_ref ? `${r.order_ref} — ${r.sku || r.name}` : (r.sku || r.name)}{!r.is_active && ' (inactive)'}</span>
             <span style={{ fontWeight: 600 }}>{Number(r.total_hours)} hrs</span>
           </div>
         ))}
@@ -931,7 +931,7 @@ function SendHoursTab() {
               <div className="card" style={{ marginBottom: 16 }}>
                 {preview.ctp.by_build.map(b => (
                   <div key={b.ctp_build_ref} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
-                    <span>{b.order_ref} — {b.build_name}</span>
+                    <span>{b.order_ref} — {b.build_sku || b.build_name}</span>
                     <span style={{ fontWeight: 600 }}>{b.hours}h ({b.entry_count})</span>
                   </div>
                 ))}

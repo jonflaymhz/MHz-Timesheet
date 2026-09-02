@@ -471,11 +471,11 @@ router.get('/ctp-sync-log', requireAuth, requireSystemAdmin, async (req, res) =>
 // which builds are cheap or expensive to make, which is the stated purpose.
 router.get('/reports/ctp-hours', requireAuth, requireSystemAdmin, async (req, res) => {
   const result = await db.query(
-    `SELECT cb.id, cb.name, cb.order_ref, cb.is_active, COALESCE(SUM(te.hours), 0) AS total_hours,
+    `SELECT cb.id, cb.name, cb.sku, cb.order_ref, cb.is_active, COALESCE(SUM(te.hours), 0) AS total_hours,
             COUNT(DISTINCT te.week_id) AS weeks_logged
        FROM ctp_build cb
        LEFT JOIN timesheet_entry te ON te.ctp_build_id = cb.id AND NOT te.is_non_work_marker
-      GROUP BY cb.id, cb.name, cb.order_ref, cb.is_active
+      GROUP BY cb.id, cb.name, cb.sku, cb.order_ref, cb.is_active
       ORDER BY total_hours DESC, cb.name`
   );
   res.json(result.rows);
@@ -638,7 +638,7 @@ router.get('/send-hours/preview', requireAuth, requirePayrollAdmin, async (req, 
   for (const e of ctpEntries) {
     const key = e.ctp_build_ref || '(no build ref)';
     if (!byBuild.has(key)) {
-      byBuild.set(key, { ctp_build_ref: e.ctp_build_ref, build_name: e.build_name, order_ref: e.order_ref, hours: 0, entry_count: 0 });
+      byBuild.set(key, { ctp_build_ref: e.ctp_build_ref, build_name: e.build_name, build_sku: e.build_sku, order_ref: e.order_ref, hours: 0, entry_count: 0 });
     }
     const b = byBuild.get(key);
     b.hours += Number(e.hours);

@@ -14,7 +14,7 @@ function ctpAuthHeader() {
 async function getEligibleEntries() {
   const result = await db.query(
     `SELECT te.id, te.entry_date, te.hours,
-            cb.ctp_ref AS ctp_build_ref, cb.name AS build_name, cb.order_ref,
+            cb.ctp_ref AS ctp_build_ref, cb.name AS build_name, cb.sku AS build_sku, cb.order_ref,
             cc.name AS category_name,
             u.full_name AS person_name,
             tw.week_start_date
