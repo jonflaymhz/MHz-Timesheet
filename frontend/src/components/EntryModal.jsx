@@ -9,6 +9,10 @@ import { fmtShort, weekdayName } from '../lib/dates.js'
 // 13 item 2) — a wiring contractor logging Holiday shouldn't have to hunt
 // for IL-AD by hand.
 export default function EntryModal({ weekId, date, department, hasCtpAccess, onClose, onSaved }) {
+  // Section 5: "CTP-only staff see CTP builds only" — a CTP-department
+  // person with no dual MHz access never needs the project/reason side of
+  // the picker at all, not just CTP added alongside it.
+  const ctpOnly = department === 'CTP' && hasCtpAccess
   const [selection, setSelection] = useState(null) // { type: 'project'|'reason'|'ctpBuild'|'ctpCategory', id/buildId+categoryId, label }
   const [costCodes, setCostCodes] = useState([])
   const [costCodeId, setCostCodeId] = useState('')
@@ -40,7 +44,7 @@ export default function EntryModal({ weekId, date, department, hasCtpAccess, onC
   }, [selection, department, isCtp])
 
   async function save() {
-    if (!selection) { setError('Pick a project, a reason, or a CTP build'); return }
+    if (!selection) { setError(ctpOnly ? 'Pick a CTP build or category' : 'Pick a project, a reason, or a CTP build'); return }
     if (isCtpBuildIncomplete) { setError('Pick what you did on this build'); return }
     if (!isCtp && !costCodeId) { setError('Pick a cost code'); return }
     if (requiresComment && !description.trim()) { setError(`Notes are required when "${selection.label.split(' · ').pop()}" is selected`); return }
@@ -75,7 +79,7 @@ export default function EntryModal({ weekId, date, department, hasCtpAccess, onC
 
         {error && <div className="banner banner-error">{error}</div>}
 
-        <ProjectReasonPicker value={selection} onSelect={setSelection} showCtp={!!hasCtpAccess} />
+        <ProjectReasonPicker value={selection} onSelect={setSelection} showCtp={!!hasCtpAccess} ctpOnly={ctpOnly} />
 
         {selection && (
           <>
