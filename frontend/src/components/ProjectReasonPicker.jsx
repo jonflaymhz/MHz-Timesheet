@@ -59,6 +59,15 @@ export default function ProjectReasonPicker({ value, onSelect, showCtp, ctpOnly 
   const selectedBuildId = value?.type === 'ctpBuild' ? value.buildId : null
   const selectedBuild = ctpBuilds.find(b => b.id === selectedBuildId)
 
+  // "3 x DBBox3 / SO1234 / SCMS" — one line per order+product, not per unit
+  // (Section 3, matching CTP's own Whiteboard grouping), with the customer
+  // always visible so two orders for the same product aren't ambiguous.
+  function buildIdentity(b) {
+    if (!b) return ''
+    const qty = b.qty_open > 1 ? `${b.qty_open} x ` : ''
+    return `${qty}${b.name} / ${b.order_ref || 'manual'}${b.customer ? ' / ' + b.customer : ''}`
+  }
+
   function pickBuild(b) {
     // Keep the already-picked category if there is one — switching which
     // build the same category applies to is a common correction.
@@ -66,7 +75,7 @@ export default function ProjectReasonPicker({ value, onSelect, showCtp, ctpOnly 
     const category = buildCategories.find(c => c.id === categoryId)
     onSelect({
       type: 'ctpBuild', buildId: b.id, categoryId,
-      label: category ? `${b.order_ref || b.name} · ${category.name}` : (b.order_ref || b.name),
+      label: category ? `${buildIdentity(b)} · ${category.name}` : buildIdentity(b),
       requiresComment: !!category?.requires_comment,
     })
   }
@@ -75,7 +84,7 @@ export default function ProjectReasonPicker({ value, onSelect, showCtp, ctpOnly 
     if (!selectedBuildId) return
     onSelect({
       type: 'ctpBuild', buildId: selectedBuildId, categoryId: c.id,
-      label: `${selectedBuild?.order_ref || selectedBuild?.name} · ${c.name}`,
+      label: `${buildIdentity(selectedBuild)} · ${c.name}`,
       requiresComment: !!c.requires_comment,
     })
   }
@@ -148,7 +157,7 @@ export default function ProjectReasonPicker({ value, onSelect, showCtp, ctpOnly 
                 }}
                 onClick={() => pickBuild(b)}
               >
-                {b.order_ref || b.name} — {b.name}
+                {buildIdentity(b)}
               </button>
             ))}
           </div>

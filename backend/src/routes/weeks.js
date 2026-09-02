@@ -35,7 +35,7 @@ async function weekWithEntries(weekId) {
     ),
     db.query(
       `SELECT te.*, pr.qw_project_number, pr.project_name, npr.name AS reason_name,
-              cb.name AS ctp_build_name, cb.order_ref AS ctp_build_order_ref,
+              cb.name AS ctp_build_name, cb.order_ref AS ctp_build_order_ref, cb.customer AS ctp_build_customer,
               ccat.name AS ctp_category_name, ccat.kind AS ctp_category_kind,
               cc.code AS cost_code, cc.description AS cost_code_description
          FROM timesheet_entry te

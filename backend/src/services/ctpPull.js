@@ -10,6 +10,17 @@
 // ctp-systems-test/server.js); the exact 1-week selectability rule is this
 // app's business rule to own, per Section 3, so it's applied here rather
 // than trusted from CTP's response shape.
+//
+// Grouped into build LINES (one row per order+product, with a qty), not one
+// row per physical unit — matching how CTP's own Whiteboard groups the same
+// raw per-unit data ("<orderRef>|<product>" in ctp-systems.html's
+// renderWhiteboard()) rather than a new convention invented here. A build
+// selected on Timesheet is "3 x DBBox3 on SO-1234", not one specific serial.
+// ctp_ref stores that composite key, not a single CTP builds.buildId — the
+// hours pushed back to CTP therefore carry this group key as buildId too
+// (services/ctpPush.js), not a real per-unit id. CTP's own reporting is out
+// of scope for this integration (per the CTP Integration Scope doc), so this
+// is fine for now but worth knowing before building against it later.
 
 const db = require('../db/pool');
 
@@ -43,21 +54,51 @@ function isOpen(b) {
   return ageDays <= SHIP_WINDOW_DAYS;
 }
 
+function groupKey(b) {
+  return `${b.orderRef}::${b.product}`;
+}
+
 async function pullBuilds() {
   const startedAt = new Date();
   try {
     const { builds } = await fetchFromCtp('/api/timesheet/builds');
-    for (const b of builds) {
+    const openUnits = builds.filter(isOpen);
+
+    const groups = new Map();
+    for (const b of openUnits) {
+      const key = groupKey(b);
+      let g = groups.get(key);
+      if (!g) {
+        g = { orderRef: b.orderRef, product: b.product, customer: b.customer, sku: b.sku, qty: 0, latestShipped: null };
+        groups.set(key, g);
+      }
+      g.qty++;
+      if (b.shippedDate && (!g.latestShipped || b.shippedDate > g.latestShipped)) g.latestShipped = b.shippedDate;
+    }
+
+    for (const [key, g] of groups) {
       await db.query(
-        `INSERT INTO ctp_build (name, ctp_ref, order_ref, customer, sku, stage, despatch_status, shipped_at, synced_open, last_synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+        `INSERT INTO ctp_build (name, ctp_ref, order_ref, customer, sku, shipped_at, qty_open, synced_open, last_synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,NOW())
          ON CONFLICT (ctp_ref)
-         DO UPDATE SET name = $1, order_ref = $3, customer = $4, sku = $5, stage = $6,
-                        despatch_status = $7, shipped_at = $8, synced_open = $9, last_synced_at = NOW()`,
-        [b.product, b.buildId, b.orderRef, b.customer, b.sku, b.stage, b.despatchStatus, b.shippedDate || null, isOpen(b)]
+         DO UPDATE SET name = $1, order_ref = $3, customer = $4, sku = $5, shipped_at = $6,
+                        qty_open = $7, synced_open = TRUE, last_synced_at = NOW()`,
+        [g.product, key, g.orderRef, g.customer, g.sku, g.latestShipped, g.qty]
       );
     }
-    await logSync('builds', 'success', `${builds.length} builds synced`, startedAt);
+
+    // Close out any previously-synced line that no longer has any open
+    // units (every member now past the ship window) rather than leaving it
+    // stale and still selectable.
+    const currentKeys = [...groups.keys()];
+    await db.query(
+      currentKeys.length > 0
+        ? `UPDATE ctp_build SET synced_open = FALSE, qty_open = 0 WHERE ctp_ref IS NOT NULL AND NOT (ctp_ref = ANY($1))`
+        : `UPDATE ctp_build SET synced_open = FALSE, qty_open = 0 WHERE ctp_ref IS NOT NULL`,
+      currentKeys.length > 0 ? [currentKeys] : []
+    );
+
+    await logSync('builds', 'success', `${groups.size} build lines synced from ${openUnits.length} open units (${builds.length} total)`, startedAt);
   } catch (err) {
     await logSync('builds', 'error', err.message, startedAt);
     throw err;

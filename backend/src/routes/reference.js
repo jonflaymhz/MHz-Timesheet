@@ -95,7 +95,7 @@ router.get('/non-project-reasons', requireAuth, async (req, res) => {
 // pull (Section 3) — a build must clear both to be selectable.
 router.get('/ctp-builds', requireAuth, async (req, res) => {
   const result = await db.query(
-    `SELECT id, name, order_ref, customer, sku FROM ctp_build
+    `SELECT id, name, order_ref, customer, sku, qty_open FROM ctp_build
       WHERE is_active = TRUE AND synced_open = TRUE
       ORDER BY order_ref, name`
   );

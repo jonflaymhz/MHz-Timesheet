@@ -553,9 +553,9 @@ function CtpBuildsTab() {
         {builds.map(b => (
           <div key={b.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border)' }}>
             <div style={{ opacity: b.is_active ? 1 : 0.5 }}>
-              <div style={{ fontWeight: 600 }}>{b.order_ref ? `${b.order_ref} — ${b.name}` : b.name}</div>
+              <div style={{ fontWeight: 600 }}>{b.qty_open > 1 ? `${b.qty_open} x ` : ''}{b.name}{b.order_ref ? ` / ${b.order_ref}` : ''}</div>
               <div style={{ fontSize: 12, color: 'var(--text3)' }}>
-                {b.customer ? `${b.customer} · ` : ''}{b.despatch_status || (b.ctp_ref ? '' : 'Manually added')}
+                {b.customer || (b.ctp_ref ? '' : 'Manually added')}
                 {!b.synced_open && b.ctp_ref && ' · closed (past ship window)'}
               </div>
             </div>
