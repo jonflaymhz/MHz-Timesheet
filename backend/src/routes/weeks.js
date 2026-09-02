@@ -76,8 +76,12 @@ router.get('/mine', requireAuth, async (req, res) => {
     ? req.query.week_start
     : wu.fmtDate(wu.lastCompletedWeekStart());
   if (!wu.isMonday(start)) return res.status(400).json({ error: 'week_start must be a Monday' });
-  const week = await getOrCreateWeek(req.user.id, start);
-  const { entries } = await weekWithEntries(week.id);
+  const created = await getOrCreateWeek(req.user.id, start);
+  // weekWithEntries's own week row (not the bare one from getOrCreateWeek)
+  // is what carries owner_department/owner_has_ctp_access — the entry form
+  // needs those to know what to offer, and getOrCreateWeek's plain
+  // `SELECT * FROM timesheet_week` never joins to users at all.
+  const { week, entries } = await weekWithEntries(created.id);
   res.json({ week, entries });
 });
 
@@ -99,8 +103,8 @@ router.get('/for/:userId', requireAuth, async (req, res) => {
     ? req.query.week_start
     : wu.fmtDate(wu.lastCompletedWeekStart());
   if (!wu.isMonday(start)) return res.status(400).json({ error: 'week_start must be a Monday' });
-  const week = await getOrCreateWeek(targetId, start);
-  const { entries } = await weekWithEntries(week.id);
+  const created = await getOrCreateWeek(targetId, start);
+  const { week, entries } = await weekWithEntries(created.id);
   res.json({ week, entries, is_proxy: targetId !== req.user.id });
 });
 
