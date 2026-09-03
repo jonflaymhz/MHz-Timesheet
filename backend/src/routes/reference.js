@@ -93,11 +93,14 @@ router.get('/non-project-reasons', requireAuth, async (req, res) => {
 // supervisor) should get the same list. is_active is the manual admin
 // override; synced_open is the shipped-date window computed by the hourly
 // pull (Section 3) — a build must clear both to be selectable.
+// Sorted soonest-required-first (usability feedback 2026-09-02, item 5) —
+// required_by is NULL for a manually-added build or one CTP hasn't set a
+// ship date on, which NULLS LAST pushes to the bottom rather than the top.
 router.get('/ctp-builds', requireAuth, async (req, res) => {
   const result = await db.query(
-    `SELECT id, name, order_ref, customer, sku, qty_open FROM ctp_build
+    `SELECT id, name, order_ref, customer, sku, qty_open, required_by FROM ctp_build
       WHERE is_active = TRUE AND synced_open = TRUE
-      ORDER BY order_ref, name`
+      ORDER BY required_by ASC NULLS LAST, order_ref, name`
   );
   res.json(result.rows);
 });

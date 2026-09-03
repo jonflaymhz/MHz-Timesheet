@@ -1,5 +1,6 @@
-// Preset buttons plus a fine slider, both snapping to the 15-minute
-// minimum (Section 6). Kept deliberately simple — no typing a number.
+// Preset buttons plus an hours/minutes stepper, both snapping to the
+// 15-minute minimum (Section 6). Click-through only, no typing a number
+// (usability feedback 2026-09-02, item 2 — replaces the previous slider).
 const PRESETS = [0.25, 1, 8]
 
 function fmtHours(h) {
@@ -10,7 +11,47 @@ function fmtHours(h) {
   return whole + (fracLabel ? ' ' + fracLabel : '')
 }
 
-export default function HourPicker({ value, onChange, max = 12 }) {
+function StepperBox({ label, value, unit, onStep, disabled }) {
+  return (
+    <div style={{ flex: 1, textAlign: 'center' }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+        {label}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <button type="button" className="btn btn-ghost" style={{ padding: '6px 12px', fontSize: 18 }} onClick={() => onStep(-1)} disabled={disabled?.(-1)}>
+          −
+        </button>
+        <div style={{
+          flex: 1, textAlign: 'center', fontWeight: 700, fontSize: 18,
+          background: 'var(--accent-tint)', color: 'var(--accent)', borderRadius: 8, padding: '8px 4px',
+        }}>
+          {value}{unit}
+        </div>
+        <button type="button" className="btn btn-ghost" style={{ padding: '6px 12px', fontSize: 18 }} onClick={() => onStep(1)} disabled={disabled?.(1)}>
+          +
+        </button>
+      </div>
+    </div>
+  )
+}
+
+export default function HourPicker({ value, onChange, max = 14 }) {
+  const hours = Math.floor(value)
+  const minutes = Math.round((value - hours) * 60)
+
+  function stepHours(dir) {
+    const next = Math.max(0, Math.min(max, hours + dir))
+    onChange(Number((next + minutes / 60).toFixed(2)))
+  }
+
+  function stepMinutes(dir) {
+    let h = hours
+    let m = minutes + dir * 15
+    if (m < 0) { m = 45; h = Math.max(0, h - 1) }
+    if (m > 45) { m = 0; h = Math.min(max, h + 1) }
+    onChange(Number((h + m / 60).toFixed(2)))
+  }
+
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
@@ -28,18 +69,18 @@ export default function HourPicker({ value, onChange, max = 12 }) {
           </button>
         ))}
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <input
-          type="range" min={0} max={max} step={0.25} value={value}
-          onChange={e => onChange(Number(e.target.value))}
-          style={{ flex: 1, height: 40 }}
+      <div style={{ display: 'flex', gap: 16 }}>
+        <StepperBox
+          label="Hours" value={hours} unit="h" onStep={stepHours}
+          disabled={dir => (dir < 0 ? hours === 0 : hours >= max)}
         />
-        <div style={{
-          minWidth: 56, textAlign: 'center', fontWeight: 700, fontSize: 18,
-          background: 'var(--accent-tint)', color: 'var(--accent)', borderRadius: 8, padding: '8px 4px',
-        }}>
-          {fmtHours(value)}
-        </div>
+        <StepperBox
+          label="Minutes" value={minutes} unit="m" onStep={stepMinutes}
+          disabled={dir => (dir < 0 ? hours === 0 && minutes === 0 : hours >= max && minutes >= 45)}
+        />
+      </div>
+      <div style={{ textAlign: 'center', marginTop: 10, fontSize: 13, color: 'var(--text3)' }}>
+        {fmtHours(value)} {value === 1 ? 'hour' : 'hours'} total
       </div>
     </div>
   )

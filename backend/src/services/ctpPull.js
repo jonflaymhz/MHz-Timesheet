@@ -74,21 +74,24 @@ async function pullBuilds() {
       const key = groupKey(b);
       let g = groups.get(key);
       if (!g) {
-        g = { orderRef: b.orderRef, product: b.product, customer: b.customer, sku: b.sku, qty: 0, latestShipped: null };
+        g = { orderRef: b.orderRef, product: b.product, customer: b.customer, sku: b.sku, qty: 0, latestShipped: null, requiredBy: null };
         groups.set(key, g);
       }
       g.qty++;
       if (b.shippedDate && (!g.latestShipped || b.shippedDate > g.latestShipped)) g.latestShipped = b.shippedDate;
+      // Earliest required-by across the group — the soonest-due unit in the
+      // order+sku group is the one that should drive the picker's sort.
+      if (b.requiredBy && (!g.requiredBy || b.requiredBy < g.requiredBy)) g.requiredBy = b.requiredBy;
     }
 
     for (const [key, g] of groups) {
       await db.query(
-        `INSERT INTO ctp_build (name, ctp_ref, order_ref, customer, sku, shipped_at, qty_open, synced_open, last_synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,NOW())
+        `INSERT INTO ctp_build (name, ctp_ref, order_ref, customer, sku, shipped_at, qty_open, required_by, synced_open, last_synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,TRUE,NOW())
          ON CONFLICT (ctp_ref)
          DO UPDATE SET name = $1, order_ref = $3, customer = $4, sku = $5, shipped_at = $6,
-                        qty_open = $7, synced_open = TRUE, last_synced_at = NOW()`,
-        [g.product, key, g.orderRef, g.customer, g.sku, g.latestShipped, g.qty]
+                        qty_open = $7, required_by = $8, synced_open = TRUE, last_synced_at = NOW()`,
+        [g.product, key, g.orderRef, g.customer, g.sku, g.latestShipped, g.qty, g.requiredBy]
       );
     }
 

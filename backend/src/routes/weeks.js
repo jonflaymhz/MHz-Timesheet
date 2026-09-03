@@ -52,6 +52,58 @@ async function weekWithEntries(weekId) {
   return { week: weekResult.rows[0], entries: entriesResult.rows };
 }
 
+// Auto-applies a Bank Holiday entry for each bank_holiday date that falls
+// inside a newly-created week (usability feedback 2026-09-02, item 3,
+// "auto-applied category" — decided over asking staff to log it
+// themselves). Runs once, right after a week is first created, not on
+// every fetch of an existing week — same as getOrCreateWeek only inserting
+// the week row itself once. 8 hours is a standard full working day; there's
+// no per-user contracted daily-hours field to read instead (schema note #6,
+// still a fixed Mon-Fri assumption for everyone).
+async function applyBankHolidays(week, userId) {
+  const holidays = (await db.query(
+    `SELECT holiday_date FROM bank_holiday WHERE holiday_date BETWEEN $1 AND $2`,
+    [week.week_start_date, week.week_end_date]
+  )).rows;
+  if (holidays.length === 0) return;
+
+  const user = (await db.query(`SELECT department, has_ctp_access FROM users WHERE id = $1`, [userId])).rows[0];
+  if (!user) return;
+
+  // CTP department staff get CTP's own 'Bank Holiday' category — a CTP
+  // reason entry can't carry a cost code (Section 4), and there's no
+  // correct one in the 58-code catalogue to force onto them anyway, same
+  // reasoning as EntryModal's ctpOnly handling.
+  if (user.department === 'CTP') {
+    const category = (await db.query(`SELECT id FROM ctp_category WHERE name = 'Bank Holiday' AND is_active`)).rows[0];
+    if (!category) return;
+    for (const h of holidays) {
+      await db.query(
+        `INSERT INTO timesheet_entry (week_id, entry_date, ctp_category_id, hours, entered_by)
+         VALUES ($1, $2, $3, 8, $4)`,
+        [week.id, h.holiday_date, category.id, userId]
+      );
+    }
+    return;
+  }
+
+  const reason = (await db.query(`SELECT id FROM non_project_reason WHERE name = 'Bank Holiday' AND is_active`)).rows[0];
+  if (!reason) return;
+  const costCodes = (await db.query(
+    `SELECT id, code FROM cost_code WHERE is_active = TRUE ${user.department ? 'AND department = $1' : ''} ORDER BY code`,
+    user.department ? [user.department] : []
+  )).rows;
+  const costCode = costCodes.find(c => c.code === `${user.department}-AD`) || costCodes[0];
+  if (!costCode) return;
+  for (const h of holidays) {
+    await db.query(
+      `INSERT INTO timesheet_entry (week_id, entry_date, reason_id, cost_code_id, hours, entered_by)
+       VALUES ($1, $2, $3, $4, 8, $5)`,
+      [week.id, h.holiday_date, reason.id, costCode.id, userId]
+    );
+  }
+}
+
 async function getOrCreateWeek(userId, start) {
   let week = (await db.query(
     `SELECT * FROM timesheet_week WHERE user_id = $1 AND week_start_date = $2`,
@@ -64,6 +116,7 @@ async function getOrCreateWeek(userId, start) {
        VALUES ($1, $2, $3, $4) RETURNING *`,
       [userId, weekNumber, s, end]
     )).rows[0];
+    await applyBankHolidays(week, userId);
   }
   return week;
 }
@@ -221,6 +274,21 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
     if (reasonResult.rows[0].name === 'Other' && !description?.trim()) {
       return res.status(400).json({ error: 'Notes are required when "Other" is selected' });
     }
+  }
+
+  // Daily cap (usability feedback 2026-09-02, item 4): 14 hours is "probably
+  // impossible" per Jon, summed across everything logged that day for this
+  // person, not per-project — a person could otherwise split an implausible
+  // day across two projects and slip past a per-project-only check.
+  const DAILY_HOURS_CAP = 14;
+  const dayTotalResult = await db.query(
+    `SELECT COALESCE(SUM(hours), 0) AS total FROM timesheet_entry
+      WHERE week_id = $1 AND entry_date = $2 AND NOT is_non_work_marker`,
+    [week.id, entry_date]
+  );
+  const dayTotal = Number(dayTotalResult.rows[0].total) + Number(hours);
+  if (dayTotal > DAILY_HOURS_CAP) {
+    return res.status(400).json({ error: `This would put ${entry_date} at ${dayTotal} hours — the daily cap is ${DAILY_HOURS_CAP}` });
   }
 
   let rate = null;

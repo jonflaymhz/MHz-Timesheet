@@ -59,15 +59,15 @@ export default function ProjectReasonPicker({ value, onSelect, showCtp, ctpOnly 
   const selectedBuildId = value?.type === 'ctpBuild' ? value.buildId : null
   const selectedBuild = ctpBuilds.find(b => b.id === selectedBuildId)
 
-  // "3 x DBBox3 / SO1234 / SCMS" — one line per order+SKU, not per unit
-  // (Section 3, grouped the way CTP's own Whiteboard groups the same data),
-  // with the customer always visible. SKU, not the product description —
+  // "DBBox3, 3, SO1234, SCMS" — part/product no., quantity, SO no.,
+  // customer, in that order (usability feedback 2026-09-02, item 6). One
+  // line per order+SKU, not per unit (Section 3, grouped the way CTP's own
+  // Whiteboard groups the same data). SKU, not the product description —
   // "DIO1616MA-XLR (2RU)" is what identifies the unit type on the shop
   // floor, not "Dante sixteen channel mic amp / Interface Unit".
   function buildIdentity(b) {
     if (!b) return ''
-    const qty = b.qty_open > 1 ? `${b.qty_open} x ` : ''
-    return `${qty}${b.sku || b.name} / ${b.order_ref || 'manual'}${b.customer ? ' / ' + b.customer : ''}`
+    return [b.sku || b.name, b.qty_open, b.order_ref || 'manual', b.customer].filter(Boolean).join(', ')
   }
 
   function pickBuild(b) {
