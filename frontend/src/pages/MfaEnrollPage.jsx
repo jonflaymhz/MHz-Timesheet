@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
+import { useAutofocusOnVisible } from '../hooks/useAutofocusOnVisible.js'
 
 // First-login enrollment for an elevated-tier account with no MFA set up
 // yet (admin scope Section 4.2). Reached only via a pending-enrollment
@@ -16,6 +17,8 @@ export default function MfaEnrollPage() {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const codeRef = useRef(null)
+  useAutofocusOnVisible(codeRef, !!enroll && !backupCodes)
 
   useEffect(() => {
     api.post('/auth/mfa/enroll/start').then(setEnroll).catch(e => setError(e.message))
@@ -84,6 +87,7 @@ export default function MfaEnrollPage() {
           </div>
           <form onSubmit={confirm}>
             <input
+              ref={codeRef}
               className="input" inputMode="numeric" maxLength={6} placeholder="6-digit code from the app"
               value={totpCode} onChange={e => setTotpCode(e.target.value.replace(/\D/g, ''))}
               style={{ marginBottom: 16, textAlign: 'center', fontSize: 20, letterSpacing: 4 }}

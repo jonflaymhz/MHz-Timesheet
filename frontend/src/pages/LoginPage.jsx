@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
+import { useAutofocusOnVisible } from '../hooks/useAutofocusOnVisible.js'
 
 // One login page for everyone (Admin Scope Section 3.1) — no separate
 // admin/Jonny front door to find. Username is entered first; the account's
@@ -25,6 +26,9 @@ export default function LoginPage() {
   const [totpCode, setTotpCode] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const usernameRef = useRef(null)
+  const pinRef = useRef(null)
+  const passwordRef = useRef(null)
 
   useEffect(() => {
     if (kioskMode) {
@@ -71,6 +75,11 @@ export default function LoginPage() {
       setLoading(false)
     }
   }
+
+  const showCredentialStepForFocus = kioskMode ? !!selectedUsername : tier !== null
+  useAutofocusOnVisible(usernameRef, !kioskMode && !showCredentialStepForFocus)
+  useAutofocusOnVisible(pinRef, showCredentialStepForFocus && (kioskMode || tier === 'standard'))
+  useAutofocusOnVisible(passwordRef, !kioskMode && showCredentialStepForFocus && tier === 'elevated')
 
   async function submitElevated(e) {
     e.preventDefault()
@@ -126,6 +135,7 @@ export default function LoginPage() {
       {!kioskMode && !showCredentialStep && (
         <form onSubmit={continueFromUsername}>
           <input
+            ref={usernameRef}
             className="input" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)}
             style={{ marginBottom: 16 }} autoFocus
             autoCapitalize="none" autoCorrect="off" spellCheck="false"
@@ -139,6 +149,7 @@ export default function LoginPage() {
       {kioskMode && showCredentialStep && (
         <form onSubmit={submitStandard}>
           <input
+            ref={pinRef}
             className="input" type="tel" inputMode="numeric" maxLength={6} placeholder="6-digit PIN"
             value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
             style={{ marginBottom: 16, textAlign: 'center', fontSize: 24, letterSpacing: 6 }}
@@ -156,6 +167,7 @@ export default function LoginPage() {
             {username} · <button type="button" className="btn btn-ghost btn-sm" style={{ display: 'inline', padding: 0 }} onClick={backToUsername}>not you?</button>
           </div>
           <input
+            ref={pinRef}
             className="input" type="tel" inputMode="numeric" maxLength={6} placeholder="6-digit PIN"
             value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
             style={{ marginBottom: 16, textAlign: 'center', fontSize: 24, letterSpacing: 6 }}
@@ -172,7 +184,7 @@ export default function LoginPage() {
           <div style={{ textAlign: 'center', marginBottom: 16, fontSize: 13, color: 'var(--text2)' }}>
             {username} · <button type="button" className="btn btn-ghost btn-sm" style={{ display: 'inline', padding: 0 }} onClick={backToUsername}>not you?</button>
           </div>
-          <input className="input" type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} style={{ marginBottom: 12 }} autoFocus />
+          <input ref={passwordRef} className="input" type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} style={{ marginBottom: 12 }} autoFocus />
           <input
             className="input" inputMode="numeric" maxLength={6} placeholder="Authenticator code"
             value={totpCode} onChange={e => setTotpCode(e.target.value.replace(/\D/g, ''))}
