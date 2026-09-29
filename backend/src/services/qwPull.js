@@ -86,6 +86,9 @@ function collapseRates(rows) {
   }
   const codes = [];
   const exceptions = [];
+  // QW flags a code missing from its labour_code_category mapping
+  // (Financials Labour v1.1 §2); it still books, counted by prefix.
+  const unmapped = [...new Set(rows.filter(r => r.mapped === false).map(r => `${r.code}→${r.spend_category || '?'}`))];
   for (const [code, items] of byCode) {
     const counts = new Map();
     for (const i of items) {
@@ -106,14 +109,14 @@ function collapseRates(rows) {
       description: descs.length <= 2 ? descs.join(' / ') : `${descs.slice(0, 2).join(' / ')} +${descs.length - 2} more`,
     });
   }
-  return { codes, exceptions };
+  return { codes, exceptions, unmapped };
 }
 
 async function pullRates() {
   const startedAt = new Date();
   try {
     const rows = await fetchFromQW('rates');
-    const { codes, exceptions } = collapseRates(rows);
+    const { codes, exceptions, unmapped } = collapseRates(rows);
     let upserted = 0;
     const clashes = [];
     for (const c of codes) {
@@ -140,6 +143,7 @@ async function pullRates() {
     );
     let detail = `${upserted} of ${codes.length} QW base codes synced as project cost codes (from ${rows.length} catalogue items)`;
     if (exceptions.length) detail += `; rate exceptions: ${exceptions.join('; ')}`;
+    if (unmapped.length) detail += `; unmapped in QW category table (defaulted by prefix): ${unmapped.join(', ')}`;
     if (clashes.length) detail += `; skipped, clashes with a non-project code: ${clashes.join(', ')}`;
     if (retired.rows.length) detail += `; retired: ${retired.rows.map(r => r.code).join(', ')}`;
     await logSync('cost_codes', clashes.length ? 'partial' : 'success', detail, startedAt);
