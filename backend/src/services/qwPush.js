@@ -73,15 +73,17 @@ async function sendBatch(entries, initiatedByUserId) {
   const byEntryId = new Map(qwResults.map(r => [r.timesheet_entry_id, r]));
   const succeededIds = [];
   const failures = [];
+  let alreadyPresent = 0;
 
   for (const e of sendable) {
     const r = requestError ? { status: 'error', message: requestError } : byEntryId.get(e.id);
     if (r && (r.status === 'inserted' || r.status === 'duplicate')) {
       succeededIds.push(e.id);
+      if (r.status === 'duplicate') alreadyPresent += 1;
     } else {
       failures.push({
         entry_id: e.id, entry_date: e.entry_date, hours: e.hours,
-        project: e.qw_project_number, person: e.person_name,
+        project: e.qw_project_number, project_name: e.project_name, person: e.person_name,
         reason: r?.message || 'No response from QW for this entry',
       });
     }
@@ -89,7 +91,7 @@ async function sendBatch(entries, initiatedByUserId) {
   for (const e of noMapping) {
     failures.push({
       entry_id: e.id, entry_date: e.entry_date, hours: e.hours,
-      project: e.qw_project_number, person: e.person_name,
+      project: e.qw_project_number, project_name: e.project_name, person: e.person_name,
       reason: 'No QW account mapping for this person',
     });
   }
@@ -117,14 +119,20 @@ async function sendBatch(entries, initiatedByUserId) {
     [batch.id, initiatedByUserId, JSON.stringify({ attempted, succeeded, failed })]
   );
 
+  // Integration health only shows the latest detail line, so a failed push
+  // carries its first failure reason here — otherwise "24 failed" says
+  // nothing about why.
+  const inserted = succeeded - alreadyPresent;
+  const firstReason = failures[0]?.reason;
   await logSync(
     'push', 'approved_hours',
     failed === 0 ? 'success' : (succeeded === 0 ? 'error' : 'partial'),
-    `Batch ${batch.id}: ${succeeded} sent, ${failed} failed of ${attempted} attempted`,
+    `Batch ${batch.id}: ${inserted} sent, ${alreadyPresent} already present, ${failed} failed of ${attempted} attempted`
+      + (firstReason ? ` — first failure: ${firstReason.slice(0, 300)}` : ''),
     startedAt
   );
 
-  return { batch_id: batch.id, initiated_at: batch.initiated_at, attempted, succeeded, failed, failures };
+  return { batch_id: batch.id, initiated_at: batch.initiated_at, attempted, succeeded, inserted, already_present: alreadyPresent, failed, failures };
 }
 
 async function logSync(direction, type, status, detail, startedAt) {

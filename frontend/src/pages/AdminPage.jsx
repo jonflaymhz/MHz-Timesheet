@@ -833,7 +833,10 @@ function SendHoursTab() {
   const [error, setError] = useState('')
 
   function loadPreview() {
-    setLoading(true); setError(''); setResult(null)
+    // Deliberately leaves `result` alone — a commit reloads the preview
+    // straight after, and clearing it here is what used to wipe the
+    // outcome before anyone could read it.
+    setLoading(true); setError('')
     api.get('/admin/send-hours/preview').then(setPreview).catch(e => setError(e.message)).finally(() => setLoading(false))
   }
 
@@ -868,28 +871,32 @@ function SendHoursTab() {
 
       {result && (
         <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Last send result</div>
+            <button className="btn" onClick={() => setResult(null)}>Dismiss</button>
+          </div>
           {result.qw && (
-            <div style={{ marginBottom: result.ctp ? 12 : 0 }}>
-              <div style={{ fontWeight: 700, marginBottom: 8 }}>
-                QW: {result.qw.succeeded} sent, {result.qw.failed} failed of {result.qw.attempted} attempted
-              </div>
-              {result.qw.failures.map(f => (
-                <div key={f.entry_id} style={{ fontSize: 13, padding: '6px 0', borderTop: '1px solid var(--border)' }}>
-                  {f.person} · {f.project || '(no project)'} · {f.entry_date} · {f.hours}h — <span style={{ color: 'var(--status-bad-text)' }}>{f.reason}</span>
-                </div>
-              ))}
-            </div>
+            <SendResultBlock
+              label="QW"
+              counts={[
+                `${result.qw.inserted ?? result.qw.succeeded} sent`,
+                `${result.qw.already_present ?? 0} already present`,
+                `${result.qw.failed} failed`,
+              ]}
+              attempted={result.qw.attempted}
+              failed={result.qw.failed}
+              failures={result.qw.failures.map(f => ({ ...f, where: f.project_name || f.project || '(no project)' }))}
+            />
           )}
           {result.ctp && (
-            <div>
-              <div style={{ fontWeight: 700, marginBottom: 8 }}>
-                CTP: {result.ctp.succeeded} sent, {result.ctp.failed} failed of {result.ctp.attempted} attempted
-              </div>
-              {result.ctp.failures.map(f => (
-                <div key={f.entry_id} style={{ fontSize: 13, padding: '6px 0', borderTop: '1px solid var(--border)' }}>
-                  {f.person} · {f.build || '(no build)'} · {f.entry_date} · {f.hours}h — <span style={{ color: 'var(--status-bad-text)' }}>{f.reason}</span>
-                </div>
-              ))}
+            <div style={{ marginTop: result.qw ? 14 : 0 }}>
+              <SendResultBlock
+                label="CTP"
+                counts={[`${result.ctp.succeeded} sent`, `${result.ctp.failed} failed`]}
+                attempted={result.ctp.attempted}
+                failed={result.ctp.failed}
+                failures={result.ctp.failures.map(f => ({ ...f, where: f.build || '(no build)' }))}
+              />
             </div>
           )}
         </div>
@@ -913,7 +920,7 @@ function SendHoursTab() {
               <div className="card" style={{ marginBottom: 16 }}>
                 {preview.qw.by_project.map(p => (
                   <div key={p.qw_project_number} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
-                    <span>{p.qw_project_number} — {p.project_name}</span>
+                    <span>{p.project_name || p.qw_project_number}</span>
                     <span style={{ fontWeight: 600 }}>{p.hours}h ({p.entry_count})</span>
                   </div>
                 ))}
@@ -948,6 +955,35 @@ function SendHoursTab() {
           </button>
         </>
       )}
+    </div>
+  )
+}
+
+// Failures sharing one reason (typically a request-level error that hit the
+// whole batch) collapse into a single heading instead of N identical lines.
+function SendResultBlock({ label, counts, attempted, failed, failures }) {
+  const groups = new Map()
+  for (const f of failures) {
+    if (!groups.has(f.reason)) groups.set(f.reason, [])
+    groups.get(f.reason).push(f)
+  }
+  return (
+    <div>
+      <div style={{ fontWeight: 700, marginBottom: 6, color: failed > 0 ? 'var(--status-bad-text)' : 'var(--status-good-text)' }}>
+        {label}: {counts.join(', ')} of {attempted} attempted
+      </div>
+      {[...groups.entries()].map(([reason, items]) => (
+        <div key={reason} style={{ borderTop: '1px solid var(--border)', padding: '8px 0' }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--status-bad-text)', marginBottom: 4, wordBreak: 'break-word' }}>
+            {items.length} {items.length === 1 ? 'entry' : 'entries'}: {reason}
+          </div>
+          {items.map(f => (
+            <div key={f.entry_id} style={{ fontSize: 13, color: 'var(--text2)', padding: '2px 0 2px 12px' }}>
+              {f.person} · {String(f.entry_date).slice(0, 10)} · {f.where} · {Number(f.hours)}h
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   )
 }
