@@ -8,6 +8,7 @@ const { revokeAllSessionsForUser } = require('../services/session');
 const { getEligibleEntries, sendBatch } = require('../services/qwPush');
 const { getEligibleEntries: getEligibleCtpEntries, sendBatch: sendCtpBatch } = require('../services/ctpPush');
 const { approvalDecision, snapshotRatesAtApproval } = require('../services/approval');
+const { allowedOnProject, allowedOnReason } = require('../services/codeRules');
 
 // Catalogue department codes a person can be mapped to (Working Cost Codes
 // v1.1 §2.5) — picks their default non-project admin code.
@@ -531,8 +532,8 @@ router.post('/entries/:id/correct', requireAuth, requireOverrideAuthority, async
   if (!existing) return res.status(404).json({ error: 'Entry not found' });
   // Same code-type rule as entry (Working Cost Codes v1.1 §2.3), and a
   // corrected project entry is re-costed at the new code's current rate.
-  const nextCode = (await db.query(`SELECT code_type, current_rate FROM cost_code WHERE id = $1`, [cost_code_id || existing.cost_code_id])).rows[0];
-  if (nextCode && nextCode.code_type !== (project_ref_id ? 'project' : 'non_project')) {
+  const nextCode = (await db.query(`SELECT code, code_type, current_rate FROM cost_code WHERE id = $1`, [cost_code_id || existing.cost_code_id])).rows[0];
+  if (nextCode && !(project_ref_id ? allowedOnProject : allowedOnReason)(nextCode)) {
     return res.status(400).json({ error: project_ref_id ? 'Project time needs a project cost code' : 'Non-project time needs a non-project cost code' });
   }
   const rate = project_ref_id && nextCode ? nextCode.current_rate : null;

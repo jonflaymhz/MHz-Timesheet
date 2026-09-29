@@ -3,6 +3,7 @@ const db = require('../db/pool');
 const { requireAuth } = require('../middleware/auth');
 const wu = require('../services/weekUtils');
 const { approvalDecision, canActFor, snapshotRatesAtApproval } = require('../services/approval');
+const { allowedOnProject, allowedOnReason } = require('../services/codeRules');
 
 const router = express.Router();
 
@@ -307,12 +308,11 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
 
   let rate = null;
   if (cost_code_id) {
-    const costResult = await db.query(`SELECT current_rate, code_type FROM cost_code WHERE id = $1 AND is_active`, [cost_code_id]);
+    const costResult = await db.query(`SELECT code, current_rate, code_type FROM cost_code WHERE id = $1 AND is_active`, [cost_code_id]);
     if (!costResult.rows[0]) return res.status(400).json({ error: 'Unknown cost code' });
-    // §2.3: project time books to QW catalogue codes, reason time to the
-    // local non-project codes — never crossed.
-    const wanted = project_ref_id ? 'project' : 'non_project';
-    if (costResult.rows[0].code_type !== wanted) {
+    // §2.3: project time books to QW catalogue codes (or rework), reason
+    // time to the local non-project codes.
+    if (!(project_ref_id ? allowedOnProject : allowedOnReason)(costResult.rows[0])) {
       return res.status(400).json({ error: project_ref_id ? 'Project time needs a project cost code' : 'Non-project time needs a non-project cost code' });
     }
     rate = costResult.rows[0].current_rate;

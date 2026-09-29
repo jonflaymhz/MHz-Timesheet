@@ -67,16 +67,17 @@ router.get('/projects', requireAuth, async (req, res) => {
 
 // ── GET /api/reference/cost-codes ─────────────────────────────
 // Working Cost Codes v1.1 §2.3: ?type=project for project time (QW catalogue
-// codes; with ?project_ref_id each carries on_project when it's sold on
-// that project's estimate), ?type=non_project for reason time (each carries
+// codes plus RW-* rework codes; with ?project_ref_id each carries on_project
+// when it's sold on that project's estimate), ?type=non_project for reason time (each carries
 // is_default for the person's department admin code, from ?dept_code).
 // ?department keeps its old meaning for any older caller.
 router.get('/cost-codes', requireAuth, async (req, res) => {
   const params = [];
   let where = 'cc.is_active = TRUE';
-  if (req.query.type === 'project' || req.query.type === 'non_project') {
-    params.push(req.query.type);
-    where += ` AND cc.code_type = $${params.length}`;
+  if (req.query.type === 'project') {
+    where += ` AND (cc.code_type = 'project' OR cc.code ~ '^RW-')`;
+  } else if (req.query.type === 'non_project') {
+    where += ` AND cc.code_type = 'non_project'`;
   }
   if (req.query.department) {
     params.push(req.query.department);
