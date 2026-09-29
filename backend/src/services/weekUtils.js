@@ -56,4 +56,10 @@ function isQuarterHour(hours) {
   return Math.round(hours * 4) === hours * 4;
 }
 
-module.exports = { isoWeekNumber, mondayOf, fmtDate, lastCompletedWeekStart, currentWeekStart, weekBounds, isMonday, isQuarterHour };
+// Today's calendar date in the UK, as 'YYYY-MM-DD' — the future-date rule
+// (Working Cost Codes v1.1 §2.6) must not flip at midnight UTC during BST.
+function londonToday(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+}
+
+module.exports = { londonToday, isoWeekNumber, mondayOf, fmtDate, lastCompletedWeekStart, currentWeekStart, weekBounds, isMonday, isQuarterHour };

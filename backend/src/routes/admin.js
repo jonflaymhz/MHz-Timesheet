@@ -7,6 +7,16 @@ const { generatePassword } = require('../services/password');
 const { revokeAllSessionsForUser } = require('../services/session');
 const { getEligibleEntries, sendBatch } = require('../services/qwPush');
 const { getEligibleEntries: getEligibleCtpEntries, sendBatch: sendCtpBatch } = require('../services/ctpPush');
+const { approvalDecision, snapshotRatesAtApproval } = require('../services/approval');
+
+// Catalogue department codes a person can be mapped to (Working Cost Codes
+// v1.1 §2.5) — picks their default non-project admin code.
+const DEPT_CODES = ['CL', 'WW', 'EL', 'IL', 'PM'];
+function cleanDeptCode(v) {
+  if (v === undefined) return undefined;
+  const c = (v || '').toString().trim().toUpperCase();
+  return c === '' ? null : (DEPT_CODES.includes(c) ? c : undefined);
+}
 
 const router = express.Router();
 
@@ -37,7 +47,7 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
   const result = await db.query(
-    `SELECT u.id, u.full_name, u.username, u.department, u.employment_type,
+    `SELECT u.id, u.full_name, u.username, u.department, u.dept_code, u.employment_type,
             u.reports_to, r.full_name AS reports_to_name,
             u.can_approve, u.is_payroll_admin, u.is_system_admin, u.has_ctp_access,
             u.is_active, u.removed_at, u.pin_locked_at, u.mfa_enabled, u.last_login_at,
@@ -56,6 +66,8 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
 // person can be an Entry account and elevated-tier at the same time.
 router.post('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   const { full_name, username, department, employment_type, reports_to, does_timesheets, can_approve, is_payroll_admin, is_system_admin, has_ctp_access } = req.body;
+  const deptCode = cleanDeptCode(req.body.dept_code);
+  if (req.body.dept_code && deptCode === undefined) return res.status(400).json({ error: `dept_code must be one of ${DEPT_CODES.join(', ')}` });
   if (!full_name || !username) {
     return res.status(400).json({ error: 'full_name and username are required' });
   }
@@ -78,10 +90,10 @@ router.post('/users', requireAuth, requireSystemAdmin, async (req, res) => {
 
   try {
     const result = await db.query(
-      `INSERT INTO users (full_name, username, department, employment_type, reports_to, pin_hash, password_hash, can_approve, is_payroll_admin, is_system_admin, has_ctp_access)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, full_name, username`,
+      `INSERT INTO users (full_name, username, department, employment_type, reports_to, pin_hash, password_hash, can_approve, is_payroll_admin, is_system_admin, has_ctp_access, dept_code)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, full_name, username`,
       [full_name, username.trim().toLowerCase(), department || null, employment_type || 'employee', reports_to || null,
-        pinHash, passwordHash, !!can_approve, !!is_payroll_admin, !!is_system_admin, !!has_ctp_access]
+        pinHash, passwordHash, !!can_approve, !!is_payroll_admin, !!is_system_admin, !!has_ctp_access, deptCode || null]
     );
     res.status(201).json({ ...result.rows[0], initial_pin: initialPin, initial_password: initialPassword });
   } catch (err) {
@@ -92,6 +104,8 @@ router.post('/users', requireAuth, requireSystemAdmin, async (req, res) => {
 
 router.patch('/users/:id', requireAuth, requireSystemAdmin, async (req, res) => {
   const { department, employment_type, reports_to, can_approve, is_payroll_admin, is_system_admin, has_ctp_access } = req.body;
+  const deptCode = cleanDeptCode(req.body.dept_code);
+  if (req.body.dept_code && deptCode === undefined) return res.status(400).json({ error: `dept_code must be one of ${DEPT_CODES.join(', ')}` });
   const before = (await db.query(`SELECT * FROM users WHERE id = $1`, [req.params.id])).rows[0];
   if (!before) return res.status(404).json({ error: 'User not found' });
 
@@ -116,14 +130,16 @@ router.patch('/users/:id', requireAuth, requireSystemAdmin, async (req, res) => 
             is_system_admin = COALESCE($7, is_system_admin),
             has_ctp_access = COALESCE($9, has_ctp_access),
             password_hash = $8,
+            dept_code = CASE WHEN $10 THEN $11 ELSE dept_code END,
             updated_at = NOW()
       WHERE id = $1
-      RETURNING id, full_name, department, employment_type, reports_to, can_approve, is_payroll_admin, is_system_admin, has_ctp_access`,
-    [req.params.id, department, employment_type, reports_to || null, can_approve, is_payroll_admin, is_system_admin, passwordHash, has_ctp_access]
+      RETURNING id, full_name, department, dept_code, employment_type, reports_to, can_approve, is_payroll_admin, is_system_admin, has_ctp_access`,
+    [req.params.id, department, employment_type, reports_to || null, can_approve, is_payroll_admin, is_system_admin, passwordHash, has_ctp_access,
+      deptCode !== undefined, deptCode ?? null]
   );
 
   const changed = {};
-  for (const key of ['department', 'employment_type', 'reports_to', 'can_approve', 'is_payroll_admin', 'is_system_admin', 'has_ctp_access']) {
+  for (const key of ['department', 'dept_code', 'employment_type', 'reports_to', 'can_approve', 'is_payroll_admin', 'is_system_admin', 'has_ctp_access']) {
     if (result.rows[0][key] !== before[key]) changed[key] = { old: before[key], new: result.rows[0][key] };
   }
   if (Object.keys(changed).length > 0) {
@@ -277,10 +293,11 @@ router.get('/projects', requireAuth, requireSystemAdmin, async (req, res) => {
   if (req.query.status === 'closed') where = 'NOT COALESCE(admin_override, is_open)';
   if (req.query.q) {
     params.push(`%${req.query.q}%`);
-    where += ` AND (qw_project_number ILIKE $${params.length} OR project_name ILIKE $${params.length})`;
+    where += ` AND (qw_project_number ILIKE $${params.length} OR project_name ILIKE $${params.length}
+               OR project_title ILIKE $${params.length} OR customer_name ILIKE $${params.length})`;
   }
   const result = await db.query(
-    `SELECT id, qw_project_number, project_name, qw_status, is_open, admin_override, timesheet_enabled, last_synced_at,
+    `SELECT id, qw_project_number, project_name, project_title, customer_name, qw_status, is_open, admin_override, timesheet_enabled, last_synced_at, closed_reason,
             COALESCE(admin_override, is_open) AS effective_open
        FROM project_ref WHERE ${where} ORDER BY qw_project_number`,
     params
@@ -406,12 +423,18 @@ router.delete('/projects/:id/visibility/:userId', requireAuth, requireSystemAdmi
 // Rates don't need to come from QW (confirmed) — admin sets/maintains them
 // directly here instead of relying on the rate_code sync match.
 router.get('/cost-codes', requireAuth, requireSystemAdmin, async (req, res) => {
-  const result = await db.query(`SELECT * FROM cost_code ORDER BY department, code`);
+  const result = await db.query(`SELECT * FROM cost_code ORDER BY code_type DESC, department, code`);
   res.json(result.rows);
 });
 
 router.patch('/cost-codes/:id', requireAuth, requireSystemAdmin, async (req, res) => {
   const { current_rate, is_active } = req.body;
+  // Project codes and their rates come from the QW catalogue every hour
+  // (Working Cost Codes v1.1 §2.1); a local edit would just be overwritten.
+  const existing = (await db.query(`SELECT code_type FROM cost_code WHERE id = $1`, [req.params.id])).rows[0];
+  if (existing?.code_type === 'project' && current_rate !== undefined) {
+    return res.status(400).json({ error: 'Project code rates come from the QW labour catalogue; change them there' });
+  }
   const result = await db.query(
     `UPDATE cost_code SET current_rate = COALESCE($2, current_rate), is_active = COALESCE($3, is_active)
       WHERE id = $1 RETURNING *`,
@@ -506,6 +529,13 @@ router.post('/entries/:id/correct', requireAuth, requireOverrideAuthority, async
   if (!auditReason) return res.status(400).json({ error: 'A reason is required for a Correct action' });
   const existing = (await db.query(`SELECT * FROM timesheet_entry WHERE id = $1`, [req.params.id])).rows[0];
   if (!existing) return res.status(404).json({ error: 'Entry not found' });
+  // Same code-type rule as entry (Working Cost Codes v1.1 §2.3), and a
+  // corrected project entry is re-costed at the new code's current rate.
+  const nextCode = (await db.query(`SELECT code_type, current_rate FROM cost_code WHERE id = $1`, [cost_code_id || existing.cost_code_id])).rows[0];
+  if (nextCode && nextCode.code_type !== (project_ref_id ? 'project' : 'non_project')) {
+    return res.status(400).json({ error: project_ref_id ? 'Project time needs a project cost code' : 'Non-project time needs a non-project cost code' });
+  }
+  const rate = project_ref_id && nextCode ? nextCode.current_rate : null;
 
   // Correct changes project or category only — hours are untouched (§5).
   // Clearing qw_sent_at/qw_send_batch_id here (Actual Hours Feedback Design
@@ -515,9 +545,10 @@ router.post('/entries/:id/correct', requireAuth, requireOverrideAuthority, async
   const result = await db.query(
     `UPDATE timesheet_entry
         SET project_ref_id = $2, reason_id = $3, cost_code_id = $4, updated_at = NOW(),
+            rate_at_entry = $5, calculated_cost_at_entry = CASE WHEN $5::numeric IS NULL THEN NULL ELSE hours * $5::numeric END,
             qw_sent_at = NULL, qw_send_batch_id = NULL
       WHERE id = $1 RETURNING *`,
-    [req.params.id, project_ref_id || null, reason_id || null, cost_code_id || existing.cost_code_id]
+    [req.params.id, project_ref_id || null, reason_id || null, cost_code_id || existing.cost_code_id, rate]
   );
   await db.query(
     `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by, old_value, new_value, reason)
@@ -560,8 +591,13 @@ router.post('/weeks/:id/approve', requireAuth, requireOverrideAuthority, async (
   const week = (await db.query(`SELECT * FROM timesheet_week WHERE id = $1`, [req.params.id])).rows[0];
   if (!week) return res.status(404).json({ error: 'Week not found' });
   if (week.status === 'approved') return res.status(400).json({ error: 'Week is already approved' });
+  // §2.10 holds for the override too: an admin who entered hours on the
+  // week (or owns it) needs the other admin.
+  const decision = await approvalDecision(week, req.user);
+  if (!decision.allowed) return res.status(403).json({ error: decision.reason });
   // Section 10.2 applies here too — same confirmation as a supervisor's Approve.
   if (!req.body?.confirmed) return res.status(400).json({ error: 'Confirmation is required before approving' });
+  await snapshotRatesAtApproval(week.id);
   const result = await db.query(
     `UPDATE timesheet_week SET status = 'approved', approved_at = NOW(), approved_by = $2 WHERE id = $1 RETURNING *`,
     [req.params.id, req.user.id]
@@ -571,6 +607,7 @@ router.post('/weeks/:id/approve', requireAuth, requireOverrideAuthority, async (
      VALUES ('approve', 'timesheet_week', $1, $2, $3)`,
     [req.params.id, req.user.id, JSON.stringify({
       confirmed: true, confirmation_text: "I've reviewed and confirm these hours as real.",
+      approval_path: 'admin_override', admin_approval: true, from_status: week.status, resolved_approver: decision.approver_name,
     })]
   );
   // No automatic QW push here any more (Actual Hours Feedback Design v1.0

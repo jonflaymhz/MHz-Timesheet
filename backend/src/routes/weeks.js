@@ -2,12 +2,15 @@ const express = require('express');
 const db = require('../db/pool');
 const { requireAuth } = require('../middleware/auth');
 const wu = require('../services/weekUtils');
+const { approvalDecision, canActFor, snapshotRatesAtApproval } = require('../services/approval');
 
 const router = express.Router();
 
 // A supervisor (or admin/jonny) may act on a report's week — used for both
 // viewing and proxy entry (Section 6). Returns the target week row, or null
-// if the requester has no standing to touch it.
+// if the requester has no standing to touch it. Standing includes being the
+// week's resolved approver further up the chain (Working Cost Codes v1.1
+// §2.9), not only the direct manager.
 async function loadWeekWithAuthority(weekId, requester) {
   const result = await db.query(
     `SELECT tw.*, u.full_name AS owner_full_name FROM timesheet_week tw
@@ -17,18 +20,15 @@ async function loadWeekWithAuthority(weekId, requester) {
   const week = result.rows[0];
   if (!week) return { week: null, allowed: false, isProxy: false };
   if (week.user_id === requester.id) return { week, allowed: true, isProxy: false };
-  if (requester.is_payroll_admin || requester.is_system_admin) return { week, allowed: true, isProxy: true };
-  if (requester.can_approve) {
-    const ownerResult = await db.query(`SELECT reports_to FROM users WHERE id = $1`, [week.user_id]);
-    if (ownerResult.rows[0]?.reports_to === requester.id) return { week, allowed: true, isProxy: true };
-  }
+  if (await canActFor(requester, week.user_id)) return { week, allowed: true, isProxy: true };
   return { week, allowed: false, isProxy: false };
 }
 
 async function weekWithEntries(weekId) {
   const [weekResult, entriesResult] = await Promise.all([
     db.query(
-      `SELECT tw.*, u.full_name AS owner_full_name, u.department AS owner_department, u.has_ctp_access AS owner_has_ctp_access
+      `SELECT tw.*, u.full_name AS owner_full_name, u.department AS owner_department, u.dept_code AS owner_dept_code,
+              u.has_ctp_access AS owner_has_ctp_access
          FROM timesheet_week tw
          JOIN users u ON u.id = tw.user_id WHERE tw.id = $1`,
       [weekId]
@@ -37,13 +37,14 @@ async function weekWithEntries(weekId) {
       `SELECT te.*, pr.qw_project_number, pr.project_name, npr.name AS reason_name,
               cb.name AS ctp_build_name, cb.sku AS ctp_build_sku, cb.order_ref AS ctp_build_order_ref, cb.customer AS ctp_build_customer,
               ccat.name AS ctp_category_name, ccat.kind AS ctp_category_kind,
-              cc.code AS cost_code, cc.description AS cost_code_description
+              cc.code AS cost_code, cc.description AS cost_code_description, eb.full_name AS entered_by_name
          FROM timesheet_entry te
          LEFT JOIN project_ref pr ON pr.id = te.project_ref_id
          LEFT JOIN non_project_reason npr ON npr.id = te.reason_id
          LEFT JOIN ctp_build cb ON cb.id = te.ctp_build_id
          LEFT JOIN ctp_category ccat ON ccat.id = te.ctp_category_id
          LEFT JOIN cost_code cc ON cc.id = te.cost_code_id
+         LEFT JOIN users eb ON eb.id = te.entered_by
         WHERE te.week_id = $1
         ORDER BY te.entry_date, te.created_at`,
       [weekId]
@@ -67,7 +68,7 @@ async function applyBankHolidays(week, userId) {
   )).rows;
   if (holidays.length === 0) return;
 
-  const user = (await db.query(`SELECT department, has_ctp_access FROM users WHERE id = $1`, [userId])).rows[0];
+  const user = (await db.query(`SELECT department, dept_code, has_ctp_access FROM users WHERE id = $1`, [userId])).rows[0];
   if (!user) return;
 
   // CTP department staff get CTP's own 'Bank Holiday' category — a CTP
@@ -89,11 +90,7 @@ async function applyBankHolidays(week, userId) {
 
   const reason = (await db.query(`SELECT id FROM non_project_reason WHERE name = 'Bank Holiday' AND is_active`)).rows[0];
   if (!reason) return;
-  const costCodes = (await db.query(
-    `SELECT id, code FROM cost_code WHERE is_active = TRUE ${user.department ? 'AND department = $1' : ''} ORDER BY code`,
-    user.department ? [user.department] : []
-  )).rows;
-  const costCode = costCodes.find(c => c.code === `${user.department}-AD`) || costCodes[0];
+  const costCode = await defaultAdminCode(user.dept_code);
   if (!costCode) return;
   for (const h of holidays) {
     await db.query(
@@ -102,6 +99,19 @@ async function applyBankHolidays(week, userId) {
       [week.id, h.holiday_date, reason.id, costCode.id, userId]
     );
   }
+}
+
+// The person's department admin code (Working Cost Codes v1.1 §2.5): the
+// non-project code for their dept_code — IL-DA for wiring since the IL-AD
+// clash (§2.4), <dept>-AD elsewhere. No dept_code: the first admin code.
+async function defaultAdminCode(deptCode) {
+  const result = await db.query(
+    `SELECT id, code FROM cost_code
+      WHERE is_active AND code_type = 'non_project' AND code ~ '-(AD|DA)$'
+      ORDER BY (department = $1) DESC, code`,
+    [deptCode || '']
+  );
+  return result.rows[0] || null;
 }
 
 async function getOrCreateWeek(userId, start) {
@@ -145,20 +155,14 @@ router.get('/mine', requireAuth, async (req, res) => {
 // visibly proxy-entered wherever it's shown, per Section 6.
 router.get('/for/:userId', requireAuth, async (req, res) => {
   const targetId = req.params.userId;
-  if (targetId !== req.user.id) {
-    if (!req.user.is_payroll_admin && !req.user.is_system_admin) {
-      if (!req.user.can_approve) return res.status(403).json({ error: 'Not authorised' });
-      const ownerResult = await db.query(`SELECT reports_to FROM users WHERE id = $1`, [targetId]);
-      if (ownerResult.rows[0]?.reports_to !== req.user.id) return res.status(403).json({ error: 'Not authorised' });
-    }
-  }
+  if (!(await canActFor(req.user, targetId))) return res.status(403).json({ error: 'Not authorised' });
   const start = req.query.week_start
     ? req.query.week_start
     : wu.fmtDate(wu.lastCompletedWeekStart());
   if (!wu.isMonday(start)) return res.status(400).json({ error: 'week_start must be a Monday' });
   const created = await getOrCreateWeek(targetId, start);
   const { week, entries } = await weekWithEntries(created.id);
-  res.json({ week, entries, is_proxy: targetId !== req.user.id });
+  res.json({ week, entries, is_proxy: targetId !== req.user.id, approval: await approvalDecision(week, req.user) });
 });
 
 router.get('/:id', requireAuth, async (req, res) => {
@@ -166,7 +170,7 @@ router.get('/:id', requireAuth, async (req, res) => {
   if (!week) return res.status(404).json({ error: 'Week not found' });
   if (!allowed) return res.status(403).json({ error: 'Not authorised to view this week' });
   const full = await weekWithEntries(week.id);
-  res.json(full);
+  res.json({ ...full, approval: await approvalDecision(full.week, req.user) });
 });
 
 // ── GET /api/weeks/history/mine ────────────────────────────────
@@ -188,6 +192,12 @@ function isEditable(week) {
   return week.status === 'draft' || week.status === 'rejected';
 }
 
+// Future dates (Working Cost Codes v1.1 §2.6): only planned leave can be
+// booked ahead. Matched by name across MHz reasons and CTP categories
+// (CTP's 'Holiday' and 'Bank Holiday' share these names).
+const FUTURE_ALLOWED_REASONS = ['Holiday', 'Bank Holiday', 'Unpaid Leave', 'Paternity Leave', 'Compassionate Leave', 'Hospital Appointment'];
+const FUTURE_ERROR = "Can't book work in the future";
+
 // ── POST /api/weeks/:id/entries ────────────────────────────────
 router.post('/:id/entries', requireAuth, async (req, res) => {
   const { week, allowed, isProxy } = await loadWeekWithAuthority(req.params.id, req.user);
@@ -202,6 +212,7 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
   if (Math.round(Number(hours || 0) * 4) !== Number(hours || 0) * 4) {
     return res.status(400).json({ error: 'Hours must be in 15-minute increments' });
   }
+  const isFuture = entry_date > wu.londonToday();
 
   if (is_non_work_marker) {
     try {
@@ -245,10 +256,12 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
     if (!proj.timesheet_enabled) return res.status(400).json({ error: 'This project is not yet open for timesheet entry' });
     if (!proj.visible_to_owner) return res.status(400).json({ error: 'This project is not available to this person' });
   }
+  if (project_ref_id && isFuture) return res.status(400).json({ error: FUTURE_ERROR });
   if (ctp_category_id) {
     const categoryResult = await db.query(`SELECT name, kind, requires_comment FROM ctp_category WHERE id = $1 AND is_active`, [ctp_category_id]);
     if (!categoryResult.rows[0]) return res.status(400).json({ error: 'Unknown or inactive CTP category' });
     const category = categoryResult.rows[0];
+    if (isFuture && !FUTURE_ALLOWED_REASONS.includes(category.name)) return res.status(400).json({ error: FUTURE_ERROR });
     // Section 4: 'Other' is the only category in either system that forces
     // a comment — reuses the existing Notes field, same as reason_id's
     // 'Other' handling below.
@@ -269,6 +282,7 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
   if (reason_id) {
     const reasonResult = await db.query(`SELECT name FROM non_project_reason WHERE id = $1 AND is_active`, [reason_id]);
     if (!reasonResult.rows[0]) return res.status(400).json({ error: 'Unknown or inactive reason' });
+    if (isFuture && !FUTURE_ALLOWED_REASONS.includes(reasonResult.rows[0].name)) return res.status(400).json({ error: FUTURE_ERROR });
     // Section 6.4: "Other" reuses the existing Notes field rather than a
     // new one — Notes stays optional for every other reason, as today.
     if (reasonResult.rows[0].name === 'Other' && !description?.trim()) {
@@ -293,13 +307,20 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
 
   let rate = null;
   if (cost_code_id) {
-    const costResult = await db.query(`SELECT current_rate FROM cost_code WHERE id = $1 AND is_active`, [cost_code_id]);
+    const costResult = await db.query(`SELECT current_rate, code_type FROM cost_code WHERE id = $1 AND is_active`, [cost_code_id]);
     if (!costResult.rows[0]) return res.status(400).json({ error: 'Unknown cost code' });
+    // §2.3: project time books to QW catalogue codes, reason time to the
+    // local non-project codes — never crossed.
+    const wanted = project_ref_id ? 'project' : 'non_project';
+    if (costResult.rows[0].code_type !== wanted) {
+      return res.status(400).json({ error: project_ref_id ? 'Project time needs a project cost code' : 'Non-project time needs a non-project cost code' });
+    }
     rate = costResult.rows[0].current_rate;
   }
   // Rate snapshotting (Section 4): calculated only for project time — non-
   // project and CTP time is informational only, never part of cost-vs-
   // budget reporting (Section 9), so it's never costed even if a rate exists.
+  // Provisional until approval, which re-takes the rate (§2.7).
   const rateAtEntry = project_ref_id ? rate : null;
   const cost = project_ref_id && rate != null ? Number(hours) * Number(rate) : null;
 
@@ -356,6 +377,13 @@ router.post('/:id/submit', requireAuth, async (req, res) => {
   if (missing.length > 0) {
     return res.status(400).json({ error: 'Week is incomplete', missing_dates: missing });
   }
+  // A week goes in once its working days are done (§2.6): booked-ahead
+  // leave must not let an unfinished week be submitted early.
+  const lastWeekday = new Date(start);
+  lastWeekday.setUTCDate(lastWeekday.getUTCDate() + Math.max(...CONTRACTED_WEEKDAYS) - 1);
+  if (lastWeekday.toISOString().slice(0, 10) > wu.londonToday()) {
+    return res.status(400).json({ error: `This week can be submitted from ${lastWeekday.toISOString().slice(0, 10)}, once its working days are done` });
+  }
 
   const result = await db.query(
     `UPDATE timesheet_week SET status = 'submitted', submitted_at = NOW() WHERE id = $1 RETURNING *`,
@@ -377,17 +405,18 @@ router.post('/:id/submit', requireAuth, async (req, res) => {
 // simply never offers a multi-select here. Supervisor-level; Jonny can
 // also apply this directly.
 router.post('/:id/approve', requireAuth, async (req, res) => {
-  const { week, allowed } = await loadWeekWithAuthority(req.params.id, req.user);
+  const { week } = await loadWeekWithAuthority(req.params.id, req.user);
   if (!week) return res.status(404).json({ error: 'Week not found' });
-  if (!allowed) return res.status(403).json({ error: 'Not authorised to approve this week' });
-  if (!req.user.can_approve && !req.user.is_payroll_admin && !req.user.is_system_admin) {
-    return res.status(403).json({ error: 'Requires approval access' });
-  }
+  // Working Cost Codes v1.1 §2.9/§2.10: only the resolved approver, or an
+  // admin as fallback, and never someone who entered hours on the week.
+  const decision = await approvalDecision(week, req.user);
+  if (!decision.allowed) return res.status(403).json({ error: decision.reason });
   if (week.status !== 'submitted') {
     return res.status(400).json({ error: 'Only a submitted week can be approved' });
   }
   // Section 10.2: same server-side enforcement as the submit confirmation.
   if (!req.body?.confirmed) return res.status(400).json({ error: 'Confirmation is required before approving' });
+  await snapshotRatesAtApproval(week.id);
   const result = await db.query(
     `UPDATE timesheet_week SET status = 'approved', approved_at = NOW(), approved_by = $2 WHERE id = $1 RETURNING *`,
     [week.id, req.user.id]
@@ -398,6 +427,8 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
     [week.id, req.user.id, JSON.stringify({
       status: 'approved', confirmed: true,
       confirmation_text: "I've reviewed and confirm these hours as real.",
+      approval_path: decision.path,
+      ...(decision.path === 'admin' ? { admin_approval: true, resolved_approver: decision.approver_name } : {}),
     })]
   );
   // No automatic QW push here any more (Actual Hours Feedback Design v1.0
@@ -410,12 +441,11 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
 // Supervisor-level reject of a Submitted week, reason required — same
 // mechanism as Jonny's Unsubmit, at the supervisor's level (Section 5).
 router.post('/:id/reject', requireAuth, async (req, res) => {
-  const { week, allowed } = await loadWeekWithAuthority(req.params.id, req.user);
+  const { week } = await loadWeekWithAuthority(req.params.id, req.user);
   if (!week) return res.status(404).json({ error: 'Week not found' });
-  if (!allowed) return res.status(403).json({ error: 'Not authorised to reject this week' });
-  if (!req.user.can_approve && !req.user.is_payroll_admin && !req.user.is_system_admin) {
-    return res.status(403).json({ error: 'Requires approval access' });
-  }
+  // Whoever may approve a week may send it back instead (§2.9).
+  const decision = await approvalDecision(week, req.user);
+  if (!decision.allowed) return res.status(403).json({ error: decision.reason });
   if (week.status !== 'submitted') {
     return res.status(400).json({ error: 'Only a submitted week can be rejected' });
   }

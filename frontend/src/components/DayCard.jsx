@@ -8,7 +8,7 @@ function fmtHours(h) {
 
 // Whole week always visible, running total per day (Section 6) — this is
 // one day of that week.
-export default function DayCard({ date, label, entries, weekId, department, hasCtpAccess, editable, weekOwnerId, onRefresh }) {
+export default function DayCard({ date, label, entries, weekId, department, deptCode, hasCtpAccess, editable, weekOwnerId, onRefresh }) {
   const [showAdd, setShowAdd] = useState(false)
   const total = entries.reduce((sum, e) => sum + Number(e.hours), 0)
   const marker = entries.find(e => e.is_non_work_marker)
@@ -47,7 +47,7 @@ export default function DayCard({ date, label, entries, weekId, department, hasC
                 : e.ctp_category_name)}
             </div>
             <div style={{ fontSize: 12, color: 'var(--text3)' }}>{e.cost_code || 'CTP'}
-              {weekOwnerId && e.entered_by !== weekOwnerId && <span style={{ color: 'var(--amber)', fontWeight: 600 }}> · proxy</span>}
+              {weekOwnerId && e.entered_by !== weekOwnerId && <span style={{ color: 'var(--amber)', fontWeight: 600 }}> · proxy{e.entered_by_name ? ` (${e.entered_by_name})` : ''}</span>}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
@@ -70,7 +70,7 @@ export default function DayCard({ date, label, entries, weekId, department, hasC
 
       {showAdd && (
         <EntryModal
-          weekId={weekId} date={date} department={department} hasCtpAccess={hasCtpAccess}
+          weekId={weekId} date={date} department={department} deptCode={deptCode} hasCtpAccess={hasCtpAccess}
           onClose={() => setShowAdd(false)}
           onSaved={onRefresh}
         />

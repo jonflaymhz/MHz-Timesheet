@@ -53,7 +53,10 @@ router.get('/projects', requireAuth, async (req, res) => {
   let where = bookableClause(params, req.user.id, req.user.employment_type);
   if (q) {
     params.push(`%${q}%`);
-    where += ` AND (pr.qw_project_number ILIKE $${params.length} OR pr.project_name ILIKE $${params.length})`;
+    // project_name is "SY5714 · title · client" (§2.12); the separate
+    // columns keep search working if that label format ever changes.
+    where += ` AND (pr.qw_project_number ILIKE $${params.length} OR pr.project_name ILIKE $${params.length}
+               OR pr.project_title ILIKE $${params.length} OR pr.customer_name ILIKE $${params.length})`;
   }
   const result = await db.query(
     `SELECT pr.id, pr.qw_project_number, pr.project_name FROM project_ref pr WHERE ${where} ORDER BY pr.qw_project_number`,
@@ -63,17 +66,34 @@ router.get('/projects', requireAuth, async (req, res) => {
 });
 
 // ── GET /api/reference/cost-codes ─────────────────────────────
-// ?department=IL restricts to one department's codes (used for the
-// non-project "-AD" default, Section 13 item 2).
+// Working Cost Codes v1.1 §2.3: ?type=project for project time (QW catalogue
+// codes; with ?project_ref_id each carries on_project when it's sold on
+// that project's estimate), ?type=non_project for reason time (each carries
+// is_default for the person's department admin code, from ?dept_code).
+// ?department keeps its old meaning for any older caller.
 router.get('/cost-codes', requireAuth, async (req, res) => {
   const params = [];
-  let where = 'is_active = TRUE';
+  let where = 'cc.is_active = TRUE';
+  if (req.query.type === 'project' || req.query.type === 'non_project') {
+    params.push(req.query.type);
+    where += ` AND cc.code_type = $${params.length}`;
+  }
   if (req.query.department) {
     params.push(req.query.department);
-    where += ` AND department = $${params.length}`;
+    where += ` AND cc.department = $${params.length}`;
   }
+  params.push(req.query.project_ref_id || null);
+  const projParam = params.length;
+  params.push(req.query.dept_code || null);
+  const deptParam = params.length;
   const result = await db.query(
-    `SELECT id, code, description, department, current_rate FROM cost_code WHERE ${where} ORDER BY code`,
+    `SELECT cc.id, cc.code, cc.description, cc.department, cc.current_rate, cc.code_type,
+            COALESCE(cc.code = ANY(pr.estimate_codes), FALSE) AS on_project,
+            (cc.code_type = 'non_project' AND cc.department = $${deptParam} AND cc.code ~ '-(AD|DA)$') AS is_default
+       FROM cost_code cc
+       LEFT JOIN project_ref pr ON pr.id = $${projParam}::uuid
+      WHERE ${where}
+      ORDER BY cc.code`,
     params
   );
   res.json(result.rows);

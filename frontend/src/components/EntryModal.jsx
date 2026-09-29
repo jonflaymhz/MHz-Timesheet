@@ -4,11 +4,19 @@ import ProjectReasonPicker from './ProjectReasonPicker.jsx'
 import HourPicker from './HourPicker.jsx'
 import { fmtShort, weekdayName } from '../lib/dates.js'
 
-// Add (or replace) an entry for one day. Cost code defaults to the user's
-// own department's admin code once a non-project reason is picked (Section
-// 13 item 2) — a wiring contractor logging Holiday shouldn't have to hunt
-// for IL-AD by hand.
-export default function EntryModal({ weekId, date, department, hasCtpAccess, onClose, onSaved }) {
+const DEPT_LABELS = { CL: 'Coachbuild', WW: 'Woodwork', EL: 'Engineering', IL: 'Wiring', PM: 'Project Management', RW: 'Rework' }
+const LEAVE_REASONS = ['Holiday', 'Bank Holiday', 'Unpaid Leave', 'Paternity Leave', 'Compassionate Leave', 'Hospital Appointment']
+
+function londonToday() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+}
+
+// Add (or replace) an entry for one day. Project time books to QW catalogue
+// codes, the project's own estimate codes first; reason time books to the
+// local non-project codes, defaulting to the person's department admin code
+// (Working Cost Codes v1.1 §2.3/§2.5) — a wiring contractor logging Holiday
+// shouldn't have to hunt for IL-DA by hand.
+export default function EntryModal({ weekId, date, department, deptCode, hasCtpAccess, onClose, onSaved }) {
   // Section 5: "CTP-only staff see CTP builds only" — a CTP-department
   // person with no dual MHz access never needs the project/reason side of
   // the picker at all, not just CTP added alongside it.
@@ -24,28 +32,42 @@ export default function EntryModal({ weekId, date, department, hasCtpAccess, onC
   const isCtp = selection?.type === 'ctpBuild' || selection?.type === 'ctpCategory'
   const isCtpBuildIncomplete = selection?.type === 'ctpBuild' && !selection.categoryId
   const requiresComment = (selection?.type === 'reason' && selection.label === 'Other') || (isCtp && selection.requiresComment)
+  // §2.6: only planned leave can be booked ahead of today.
+  const isFuture = date > londonToday()
+  const futureBlocked = isFuture && selection && !LEAVE_REASONS.includes(selection.type === 'reason' || selection.type === 'ctpCategory' ? selection.label : '')
 
   useEffect(() => {
     if (selection?.type === 'reason') {
-      api.get(`/reference/cost-codes${department ? `?department=${department}` : ''}`)
+      api.get(`/reference/cost-codes?type=non_project${deptCode ? `&dept_code=${deptCode}` : ''}`)
         .then(codes => {
           setCostCodes(codes)
-          const deptDefault = codes.find(c => c.code === `${department}-AD`)
-          setCostCodeId(deptDefault?.id || codes[0]?.id || '')
+          const deptDefault = codes.find(c => c.is_default)
+          setCostCodeId(deptDefault?.id || '')
         })
         .catch(() => {})
     } else if (selection?.type === 'project') {
-      api.get('/reference/cost-codes').then(setCostCodes).catch(() => {})
+      setCostCodeId('')
+      api.get(`/reference/cost-codes?type=project&project_ref_id=${selection.id}`).then(setCostCodes).catch(() => {})
     } else if (isCtp) {
       // A CTP entry has no cost code at all (Section 4) — CTP staff aren't
       // in any of the catalogue's five departments.
       setCostCodes([]); setCostCodeId('')
     }
-  }, [selection, department, isCtp])
+  }, [selection?.type, selection?.id, deptCode, isCtp])
+
+  const onProject = costCodes.filter(c => c.on_project)
+  const byDept = new Map()
+  for (const c of costCodes) {
+    if (selection?.type === 'project' && c.on_project) continue
+    const key = selection?.type === 'project' ? c.department : 'all'
+    if (!byDept.has(key)) byDept.set(key, [])
+    byDept.get(key).push(c)
+  }
 
   async function save() {
     if (!selection) { setError(ctpOnly ? 'Pick a CTP build or category' : 'Pick a project, a reason, or a CTP build'); return }
     if (isCtpBuildIncomplete) { setError('Pick what you did on this build'); return }
+    if (futureBlocked) { setError("Can't book work in the future"); return }
     if (!isCtp && !costCodeId) { setError('Pick a cost code'); return }
     if (requiresComment && !description.trim()) { setError(`Notes are required when "${selection.label.split(' · ').pop()}" is selected`); return }
     setSaving(true); setError('')
@@ -78,6 +100,9 @@ export default function EntryModal({ weekId, date, department, hasCtpAccess, onC
         </div>
 
         {error && <div className="banner banner-error">{error}</div>}
+        {isFuture && (
+          <div className="banner banner-warn">This day is still to come: only leave (Holiday, Bank Holiday, Unpaid, Paternity, Compassionate Leave, Hospital Appointment) can be booked ahead.</div>
+        )}
 
         <ProjectReasonPicker value={selection} onSelect={setSelection} showCtp={!!hasCtpAccess} ctpOnly={ctpOnly} />
 
@@ -90,7 +115,20 @@ export default function EntryModal({ weekId, date, department, hasCtpAccess, onC
                 </div>
                 <select className="input" value={costCodeId} onChange={e => setCostCodeId(e.target.value)} style={{ marginBottom: 16 }}>
                   <option value="">Select…</option>
-                  {costCodes.map(c => <option key={c.id} value={c.id}>{c.code} — {c.description}</option>)}
+                  {selection.type === 'project' ? (
+                    <>
+                      {onProject.length > 0 && (
+                        <optgroup label="On this project">
+                          {onProject.map(c => <option key={c.id} value={c.id}>{c.code} — {c.description}</option>)}
+                        </optgroup>
+                      )}
+                      {[...byDept.entries()].map(([dept, codes]) => (
+                        <optgroup key={dept} label={DEPT_LABELS[dept] || dept}>
+                          {codes.map(c => <option key={c.id} value={c.id}>{c.code} — {c.description}</option>)}
+                        </optgroup>
+                      ))}
+                    </>
+                  ) : costCodes.map(c => <option key={c.id} value={c.id}>{c.code} — {c.description}</option>)}
                 </select>
               </>
             )}

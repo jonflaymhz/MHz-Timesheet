@@ -21,6 +21,7 @@ export default function WeekPage() {
 
   const [week, setWeek] = useState(null)
   const [entries, setEntries] = useState([])
+  const [approval, setApproval] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [missing, setMissing] = useState(null)
@@ -40,6 +41,7 @@ export default function WeekPage() {
       const data = await api.get(path)
       setWeek(data.week)
       setEntries(data.entries)
+      setApproval(data.approval || null)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -101,7 +103,11 @@ export default function WeekPage() {
   const editable = week.status === 'draft' || week.status === 'rejected'
   const weekTotal = entries.reduce((s, e) => s + Number(e.hours), 0)
   const isProxyView = forUserId && forUserId !== user?.id
-  const canReview = isProxyView && week.status === 'submitted' && canApprove(user)
+  // The server decides who may approve (Working Cost Codes v1.1 §2.9/§2.10):
+  // the resolved approver, or an admin as fallback, and never someone who
+  // entered hours on the week. Anyone with approval access sees why not.
+  const canReview = isProxyView && week.status === 'submitted' && canApprove(user) && !!approval
+  const approveBlocked = canReview && !approval.allowed
 
   return (
     <div className="page">
@@ -138,6 +144,7 @@ export default function WeekPage() {
             entries={entries.filter(e => e.entry_date === date)}
             weekId={week.id}
             department={week.owner_department}
+            deptCode={week.owner_dept_code}
             hasCtpAccess={week.owner_has_ctp_access}
             editable={editable}
             weekOwnerId={week.user_id}
@@ -162,13 +169,22 @@ export default function WeekPage() {
 
       {canReview && !showReject && (
         <>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 16, fontSize: 13, color: 'var(--text2)' }}>
-            <input type="checkbox" checked={confirmApprove} onChange={e => setConfirmApprove(e.target.checked)} />
-            I've reviewed and confirm these hours as real.
-          </label>
+          {approveBlocked ? (
+            <div className="banner banner-warn" style={{ marginTop: 16 }}>{approval.reason}</div>
+          ) : (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 16, fontSize: 13, color: 'var(--text2)' }}>
+              <input type="checkbox" checked={confirmApprove} onChange={e => setConfirmApprove(e.target.checked)} />
+              I've reviewed and confirm these hours as real.
+            </label>
+          )}
+          {approval.allowed && approval.path === 'admin' && (
+            <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 4 }}>
+              Approving as admin{approval.approver_name ? ` (normally ${approval.approver_name})` : ''}. The audit log records it as an admin approval.
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
-            <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => setShowReject(true)} disabled={reviewing}>Reject</button>
-            <button className="btn btn-primary" style={{ flex: 1 }} onClick={approve} disabled={reviewing || !confirmApprove}>Approve week</button>
+            <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => setShowReject(true)} disabled={reviewing || approveBlocked}>Reject</button>
+            <button className="btn btn-primary" style={{ flex: 1 }} onClick={approve} disabled={reviewing || approveBlocked || !confirmApprove}>Approve week</button>
           </div>
         </>
       )}

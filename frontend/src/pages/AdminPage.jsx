@@ -158,7 +158,7 @@ function UsersTab() {
                   ))}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text3)' }}>
-                  {u.username}{u.department ? ` · ${u.department}` : ''} · Reports to: {u.reports_to_name || '—'}
+                  {u.username}{u.department ? ` · ${u.department}` : ''}{u.dept_code ? ` (${u.dept_code})` : ''} · Reports to: {u.reports_to_name || '—'}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text3)' }}>
                   {u.does_timesheets ? 'Has PIN' : 'No timesheet account'}
@@ -253,6 +253,7 @@ function NewUserModal({ onClose, onCreated, users }) {
   const [fullName, setFullName] = useState('')
   const [username, setUsername] = useState('')
   const [department, setDepartment] = useState('')
+  const [deptCode, setDeptCode] = useState('')
   const [doesTimesheets, setDoesTimesheets] = useState(true)
   const [employmentType, setEmploymentType] = useState('employee')
   const [reportsTo, setReportsTo] = useState('')
@@ -267,7 +268,7 @@ function NewUserModal({ onClose, onCreated, users }) {
     setSaving(true); setError('')
     try {
       const r = await api.post('/admin/users', {
-        full_name: fullName, username, department: department || null,
+        full_name: fullName, username, department: department || null, dept_code: deptCode || null,
         employment_type: employmentType, reports_to: reportsTo || null,
         does_timesheets: doesTimesheets, can_approve: canApprove,
         is_payroll_admin: isPayrollAdmin, is_system_admin: isSystemAdmin,
@@ -286,10 +287,8 @@ function NewUserModal({ onClose, onCreated, users }) {
         {error && <div className="banner banner-error">{error}</div>}
         <input className="input" placeholder="Full name" value={fullName} onChange={e => setFullName(e.target.value)} style={{ marginBottom: 10 }} />
         <input className="input" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} style={{ marginBottom: 10 }} />
-        <select className="input" value={department} onChange={e => setDepartment(e.target.value)} style={{ marginBottom: 10 }}>
-          <option value="">No department</option>
-          {['CL', 'EL', 'IL', 'WW', 'PM'].map(d => <option key={d} value={d}>{d}</option>)}
-        </select>
+        <input className="input" placeholder="Department (e.g. Wiring, Coach Sup)" value={department} onChange={e => setDepartment(e.target.value)} style={{ marginBottom: 10 }} />
+        <DeptCodeSelect value={deptCode} onChange={setDeptCode} />
         {doesTimesheets && (
           <select className="input" value={employmentType} onChange={e => setEmploymentType(e.target.value)} style={{ marginBottom: 10 }}>
             <option value="employee">Employee</option>
@@ -324,8 +323,25 @@ function NewUserModal({ onClose, onCreated, users }) {
   )
 }
 
+// Working Cost Codes v1.1 §2.5: which catalogue department the person
+// books admin time to — picks their default non-project code (IL-DA for
+// wiring, CL-AD for coachbuild…). Separate from the free-text department.
+function DeptCodeSelect({ value, onChange }) {
+  return (
+    <select className="input" value={value} onChange={e => onChange(e.target.value)} style={{ marginBottom: 10 }}>
+      <option value="">Cost-code department: none</option>
+      <option value="CL">CL · Coachbuild</option>
+      <option value="WW">WW · Woodwork</option>
+      <option value="EL">EL · Engineering</option>
+      <option value="IL">IL · Wiring</option>
+      <option value="PM">PM · Project Management</option>
+    </select>
+  )
+}
+
 function EditUserModal({ user, onClose, onSaved, users }) {
   const [department, setDepartment] = useState(user.department || '')
+  const [deptCode, setDeptCode] = useState(user.dept_code || '')
   const [employmentType, setEmploymentType] = useState(user.employment_type || 'employee')
   const [reportsTo, setReportsTo] = useState(user.reports_to || '')
   const [canApprove, setCanApprove] = useState(user.can_approve)
@@ -339,7 +355,7 @@ function EditUserModal({ user, onClose, onSaved, users }) {
     setSaving(true); setError('')
     try {
       const r = await api.patch(`/admin/users/${user.id}`, {
-        department: department || null, employment_type: employmentType, reports_to: reportsTo || null,
+        department: department || null, dept_code: deptCode || null, employment_type: employmentType, reports_to: reportsTo || null,
         can_approve: canApprove, is_payroll_admin: isPayrollAdmin, is_system_admin: isSystemAdmin,
         has_ctp_access: hasCtpAccess,
       })
@@ -353,10 +369,8 @@ function EditUserModal({ user, onClose, onSaved, users }) {
         <h2 style={{ fontSize: 18, marginBottom: 4 }}>Edit {user.full_name}</h2>
         <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 14 }}>{user.username}</div>
         {error && <div className="banner banner-error">{error}</div>}
-        <select className="input" value={department} onChange={e => setDepartment(e.target.value)} style={{ marginBottom: 10 }}>
-          <option value="">No department</option>
-          {['CL', 'EL', 'IL', 'WW', 'PM'].map(d => <option key={d} value={d}>{d}</option>)}
-        </select>
+        <input className="input" placeholder="Department (e.g. Wiring, Coach Sup)" value={department} onChange={e => setDepartment(e.target.value)} style={{ marginBottom: 10 }} />
+        <DeptCodeSelect value={deptCode} onChange={setDeptCode} />
         <select className="input" value={employmentType} onChange={e => setEmploymentType(e.target.value)} style={{ marginBottom: 10 }}>
           <option value="employee">Employee</option>
           <option value="contractor">Contractor</option>
@@ -416,7 +430,10 @@ function ProjectsTab() {
           <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap', gap: 10 }}>
             <div>
               <div style={{ fontWeight: 600 }}>{p.project_name}</div>
-              <div style={{ fontSize: 12, color: 'var(--text3)' }}>QW status: {p.qw_status} · synced {new Date(p.last_synced_at).toLocaleString('en-GB')}</div>
+              <div style={{ fontSize: 12, color: 'var(--text3)' }}>
+                QW status: {p.qw_status} · synced {new Date(p.last_synced_at).toLocaleString('en-GB')}
+                {p.closed_reason && !p.effective_open && <span style={{ color: 'var(--status-bad-text)' }}> · {p.closed_reason}</span>}
+              </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
               <span className="tag" style={{ background: p.effective_open ? 'var(--status-good-bg)' : 'var(--status-bad-bg)', color: p.effective_open ? 'var(--status-good-text)' : 'var(--status-bad-text)' }}>
@@ -598,16 +615,22 @@ function CostCodesTab() {
           <div key={c.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
             <div>
               <div style={{ fontWeight: 600 }}>{c.code} <span style={{ fontWeight: 400, color: 'var(--text3)' }}>— {c.description}</span></div>
-              <div style={{ fontSize: 12, color: 'var(--text3)' }}>Department: {c.department}</div>
+              <div style={{ fontSize: 12, color: 'var(--text3)' }}>
+                {c.code_type === 'project' ? 'Project code, from QW catalogue' : 'Non-project code'} · Department: {c.department}{!c.is_active ? ' · inactive' : ''}
+              </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span>£</span>
-              <input
-                className="input" style={{ width: 90 }} defaultValue={c.current_rate ?? ''}
-                onBlur={e => setRate(c.id, e.target.value)}
-                placeholder="rate/hr"
-              />
-            </div>
+            {c.code_type === 'project' ? (
+              <span style={{ fontWeight: 600 }}>{c.current_rate != null ? `£${Number(c.current_rate).toFixed(2)}/hr` : 'no rate'}</span>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span>£</span>
+                <input
+                  className="input" style={{ width: 90 }} defaultValue={c.current_rate ?? ''}
+                  onBlur={e => setRate(c.id, e.target.value)}
+                  placeholder="rate/hr"
+                />
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -873,7 +896,7 @@ function SendHoursTab() {
         <div className="card" style={{ padding: 16, marginBottom: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Last send result</div>
-            <button className="btn" onClick={() => setResult(null)}>Dismiss</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setResult(null)}>Dismiss</button>
           </div>
           {result.qw && (
             <SendResultBlock
