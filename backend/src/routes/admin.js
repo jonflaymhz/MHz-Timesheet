@@ -9,6 +9,7 @@ const { getEligibleEntries, sendBatch } = require('../services/qwPush');
 const { getEligibleEntries: getEligibleCtpEntries, sendBatch: sendCtpBatch } = require('../services/ctpPush');
 const { approvalDecision, snapshotRatesAtApproval } = require('../services/approval');
 const { allowedOnProject, allowedOnReason } = require('../services/codeRules');
+const { leaversWithUnsubmitted } = require('../services/closingJob');
 
 // Catalogue department codes a person can be mapped to (Working Cost Codes
 // v1.1 §2.5) — picks their default non-project admin code.
@@ -23,6 +24,7 @@ const router = express.Router();
 
 function userStatus(row) {
   if (row.removed_at) return 'removed';
+  if (row.closing_grace_end) return 'closing';
   if (!row.is_active) return 'frozen';
   return 'active';
 }
@@ -35,7 +37,8 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
     params.push(`%${req.query.q}%`);
     clauses.push(`(u.full_name ILIKE $${params.length} OR u.username ILIKE $${params.length})`);
   }
-  if (req.query.status === 'active') clauses.push(`u.is_active = TRUE AND u.removed_at IS NULL`);
+  if (req.query.status === 'active') clauses.push(`u.is_active = TRUE AND u.removed_at IS NULL AND u.closing_grace_end IS NULL`);
+  if (req.query.status === 'closing') clauses.push(`u.closing_grace_end IS NOT NULL AND u.removed_at IS NULL`);
   if (req.query.status === 'frozen') clauses.push(`u.is_active = FALSE AND u.removed_at IS NULL`);
   if (req.query.status === 'removed') clauses.push(`u.removed_at IS NOT NULL`);
   // Removed (inactive) users are left out unless asked for (scope 3.3):
@@ -51,10 +54,10 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
   const result = await db.query(
-    `SELECT u.id, u.full_name, u.short_name, u.kiosk_group, u.username, u.department, u.dept_code, u.employment_type,
+    `SELECT u.id, u.qw_user_id, u.full_name, u.short_name, u.kiosk_group, u.username, u.department, u.dept_code, u.employment_type,
             u.reports_to, r.full_name AS reports_to_name,
             u.can_approve, u.is_payroll_admin, u.is_system_admin, u.has_ctp_access,
-            u.is_active, u.removed_at, u.pin_locked_at, u.mfa_enabled, u.last_login_at,
+            u.is_active, u.removed_at, u.closing_leave_date, u.closing_grace_end, u.pin_locked_at, u.mfa_enabled, u.last_login_at,
             (u.pin_hash IS NOT NULL) AS does_timesheets
        FROM users u
        LEFT JOIN users r ON r.id = u.reports_to
@@ -73,9 +76,9 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
 async function checkReportsTo(reportsTo, selfId = null) {
   if (!reportsTo) return null;
   if (selfId && reportsTo === selfId) return 'A user cannot report to themselves';
-  const r = await db.query(`SELECT is_active, removed_at FROM users WHERE id = $1`, [reportsTo]);
+  const r = await db.query(`SELECT is_active, removed_at, closing_grace_end FROM users WHERE id = $1`, [reportsTo]);
   if (!r.rows[0]) return 'Line manager not found';
-  if (!r.rows[0].is_active || r.rows[0].removed_at) return 'Line manager must be an active user';
+  if (!r.rows[0].is_active || r.rows[0].removed_at || r.rows[0].closing_grace_end) return 'Line manager must be an active user';
   return null;
 }
 
@@ -277,9 +280,12 @@ router.post('/users/:id/reset-pin', requireAuth, requireSystemAdmin, async (req,
 // mfa_enabled/mfa_secret untouched; a lost authenticator needs the
 // separate reset-mfa action below, not just a password reset.
 router.post('/users/:id/reset-password', requireAuth, requireSystemAdmin, async (req, res) => {
-  const existing = (await db.query(`SELECT password_hash, full_name FROM users WHERE id = $1`, [req.params.id])).rows[0];
+  const existing = (await db.query(`SELECT password_hash, full_name, can_approve, is_payroll_admin, is_system_admin FROM users WHERE id = $1`, [req.params.id])).rows[0];
   if (!existing) return res.status(404).json({ error: 'User not found' });
-  if (existing.password_hash === null) return res.status(400).json({ error: 'This account does not use a password' });
+  // Elevated-tier accounts (approval/admin) sign in with a password; one made
+  // an approver by a data change may not have one yet, so this issues it.
+  const elevated = existing.can_approve || existing.is_payroll_admin || existing.is_system_admin;
+  if (existing.password_hash === null && !elevated) return res.status(400).json({ error: 'This account does not use a password' });
   const newPassword = generatePassword();
   const passwordHash = await bcrypt.hash(newPassword, 10);
   await db.query(`UPDATE users SET password_hash = $2 WHERE id = $1`, [req.params.id, passwordHash]);
@@ -663,7 +669,10 @@ router.get('/outstanding', requireAuth, requireOverrideAuthority, async (req, re
     [weekStart]
   );
   const outstanding = result.rows.filter(r => !r.status || r.status === 'draft' || r.status === 'rejected');
-  res.json({ all: result.rows, outstanding });
+  // Leavers with weeks up to their leaving date still unsubmitted (scope 5.2):
+  // flagged here for Payroll Admin, never deleted.
+  const leavers = await leaversWithUnsubmitted();
+  res.json({ all: result.rows, outstanding, leavers });
 });
 
 // ── Integration health (Section 8) ──────────────────────────────

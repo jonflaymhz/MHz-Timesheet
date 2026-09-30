@@ -11,13 +11,13 @@ const SELF_ENTERED_NOTE = 'You entered hours on this week, another approver is n
 
 async function loadUsers() {
   const result = await db.query(
-    `SELECT id, full_name, reports_to, can_approve, is_active, removed_at, is_payroll_admin, is_system_admin FROM users`
+    `SELECT id, full_name, reports_to, can_approve, is_active, removed_at, closing_grace_end, is_payroll_admin, is_system_admin FROM users`
   );
   return new Map(result.rows.map(u => [u.id, u]));
 }
 
 function isLiveApprover(u) {
-  return !!u && u.can_approve && u.is_active && !u.removed_at;
+  return !!u && u.can_approve && u.is_active && !u.removed_at && !u.closing_grace_end;
 }
 
 // Walks up from the owner's manager; null when the chain has no active

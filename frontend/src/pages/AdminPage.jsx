@@ -15,8 +15,14 @@ const TABS = [
   { key: 'sendhours', label: 'Send approved hours' },
 ]
 
+// People are added, edited, closed out and reactivated in QW Admin > Users
+// (User Management scope 3.6); this list is read-only apart from the
+// Timesheet-only resets (PIN, password, MFA, unlock).
+const QW_ADMIN_URL = 'https://app.mhz.limited/admin'
+
 const STATUS_COLORS = {
   active: { bg: 'var(--status-good-bg)', text: 'var(--status-good-text)' },
+  closing: { bg: 'var(--status-warn-bg)', text: 'var(--status-warn-text)' },
   frozen: { bg: 'var(--status-warn-bg)', text: 'var(--status-warn-text)' },
   removed: { bg: 'var(--status-bad-bg)', text: 'var(--status-bad-text)' },
 }
@@ -66,12 +72,9 @@ function capabilityLabels(u) {
 
 function UsersTab() {
   const [users, setUsers] = useState([])
-  const [managerOptions, setManagerOptions] = useState([])
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('')
   const [capability, setCapability] = useState('')
-  const [showNew, setShowNew] = useState(false)
-  const [editing, setEditing] = useState(null)
   const [secret, setSecret] = useState(null) // { title, value } | { title, codes }
   const [error, setError] = useState('')
 
@@ -82,28 +85,11 @@ function UsersTab() {
     else if (status) params.set('status', status)
     if (capability) params.set('capability', capability)
     api.get(`/admin/users${params.toString() ? `?${params}` : ''}`).then(setUsers).catch(e => setError(e.message))
-    // Line-manager picker always offers active users only, regardless of the
-    // list filter above (a filtered subset, or frozen/removed people, would
-    // otherwise be offered as managers).
-    api.get('/admin/users?status=active').then(setManagerOptions).catch(e => setError(e.message))
   }
   useEffect(load, [q, status, capability])
 
   async function unlock(id) {
     await api.post(`/admin/users/${id}/unlock-pin`).catch(e => setError(e.message))
-    load()
-  }
-  async function toggleActive(u) {
-    await api.patch(`/admin/users/${u.id}/${u.is_active ? 'deactivate' : 'reactivate'}`).catch(e => setError(e.message))
-    load()
-  }
-  async function remove(u) {
-    if (!window.confirm(`Remove ${u.full_name}? This is reversible (Restore), and their timesheet history stays intact.`)) return
-    await api.post(`/admin/users/${u.id}/remove`).catch(e => setError(e.message))
-    load()
-  }
-  async function restore(u) {
-    await api.post(`/admin/users/${u.id}/restore`).catch(e => setError(e.message))
     load()
   }
   async function resetPin(u) {
@@ -132,7 +118,10 @@ function UsersTab() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 14 }}>
         <h2 style={{ fontSize: 17 }}>Users</h2>
-        <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>+ New user</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <a className="btn btn-ghost btn-sm" href={`${QW_ADMIN_URL}?view=inactive`} target="_blank" rel="noreferrer">Inactive users (QW)</a>
+          <a className="btn btn-primary btn-sm" href={`${QW_ADMIN_URL}?new=1`} target="_blank" rel="noreferrer">+ New user (in QW)</a>
+        </div>
       </div>
       {error && <div className="banner banner-error">{error}</div>}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
@@ -169,43 +158,27 @@ function UsersTab() {
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text3)' }}>
                   {u.does_timesheets ? 'Has PIN' : 'No timesheet account'}
-                  {(u.is_payroll_admin || u.is_system_admin) && ` · MFA ${u.mfa_enabled ? 'enrolled' : 'not enrolled'}`}
+                  {(u.can_approve || u.is_payroll_admin || u.is_system_admin) && ` · MFA ${u.mfa_enabled ? 'enrolled' : 'not enrolled'}`}
                   {' · Last login: '}{u.last_login_at ? new Date(u.last_login_at).toLocaleString('en-GB') : 'never'}
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 340 }}>
-                <button className="btn btn-ghost btn-sm" onClick={() => setEditing(u)}>Edit</button>
+                {u.qw_user_id
+                  ? <a className="btn btn-ghost btn-sm" href={`${QW_ADMIN_URL}?user=${u.qw_user_id}`} target="_blank" rel="noreferrer">Edit in QW</a>
+                  : <span style={{ fontSize: 12, color: 'var(--text3)', alignSelf: 'center' }}>No QW user</span>}
                 {u.pin_locked_at && <button className="btn btn-danger btn-sm" onClick={() => unlock(u.id)}>Unlock PIN</button>}
                 {u.does_timesheets && <button className="btn btn-ghost btn-sm" onClick={() => resetPin(u)}>Reset PIN</button>}
-                {(u.is_payroll_admin || u.is_system_admin) && <button className="btn btn-ghost btn-sm" onClick={() => resetPassword(u)}>Reset password</button>}
+                {(u.can_approve || u.is_payroll_admin || u.is_system_admin) && <button className="btn btn-ghost btn-sm" onClick={() => resetPassword(u)}>Reset password</button>}
                 {(u.is_payroll_admin || u.is_system_admin) && u.mfa_enabled && <button className="btn btn-ghost btn-sm" onClick={() => resetMfa(u)}>Reset MFA</button>}
-                {u.status !== 'removed' && (
-                  <button className="btn btn-ghost btn-sm" onClick={() => toggleActive(u)}>{u.is_active ? 'Freeze' : 'Unfreeze'}</button>
+                {u.status === 'closing' && (
+                  <span style={{ fontSize: 12, color: 'var(--text3)', alignSelf: 'center' }}>Leaving {u.closing_leave_date} · access until {u.closing_grace_end}</span>
                 )}
-                {u.status === 'removed'
-                  ? <button className="btn btn-ghost btn-sm" onClick={() => restore(u)}>Restore</button>
-                  : <button className="btn btn-danger btn-sm" onClick={() => remove(u)}>Remove</button>}
               </div>
             </div>
           )
         })}
         {users.length === 0 && <div style={{ padding: 16, color: 'var(--text3)' }}>No users match.</div>}
       </div>
-      {showNew && (
-        <NewUserModal
-          onClose={() => setShowNew(false)}
-          onCreated={(secretResult) => { setShowNew(false); load(); if (secretResult) setSecret(secretResult) }}
-          users={managerOptions}
-        />
-      )}
-      {editing && (
-        <EditUserModal
-          user={editing}
-          onClose={() => setEditing(null)}
-          onSaved={(secretResult) => { setEditing(null); load(); if (secretResult) setSecret(secretResult) }}
-          users={managerOptions}
-        />
-      )}
       {secret && <SecretRevealModal {...secret} onClose={() => setSecret(null)} />}
     </div>
   )
@@ -228,186 +201,6 @@ function SecretRevealModal({ title, value, codes, onClose }) {
           </div>
         )}
         <button className="btn btn-primary" style={{ width: '100%' }} onClick={onClose}>Done</button>
-      </div>
-    </div>
-  )
-}
-
-function CapabilityCheckboxes({ doesTimesheets, setDoesTimesheets, canApprove, setCanApprove, isPayrollAdmin, setIsPayrollAdmin, isSystemAdmin, setIsSystemAdmin }) {
-  return (
-    <div style={{ marginBottom: 14, display: 'flex', flexDirection: 'column', gap: 6 }}>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <input type="checkbox" checked={doesTimesheets} onChange={e => setDoesTimesheets(e.target.checked)} />
-        Does timesheets (Entry — gets a PIN)
-      </label>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <input type="checkbox" checked={canApprove} onChange={e => setCanApprove(e.target.checked)} />
-        Approval (reviews/approves reports' timesheets)
-      </label>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <input type="checkbox" checked={isPayrollAdmin} onChange={e => setIsPayrollAdmin(e.target.checked)} />
-        Admin — Payroll/Finance
-      </label>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <input type="checkbox" checked={isSystemAdmin} onChange={e => setIsSystemAdmin(e.target.checked)} />
-        Admin — System
-      </label>
-    </div>
-  )
-}
-
-function NewUserModal({ onClose, onCreated, users }) {
-  const [fullName, setFullName] = useState('')
-  const [username, setUsername] = useState('')
-  const [department, setDepartment] = useState('')
-  const [deptCode, setDeptCode] = useState('')
-  const [doesTimesheets, setDoesTimesheets] = useState(true)
-  const [employmentType, setEmploymentType] = useState('employee')
-  const [reportsTo, setReportsTo] = useState('')
-  const [canApprove, setCanApprove] = useState(false)
-  const [isPayrollAdmin, setIsPayrollAdmin] = useState(false)
-  const [isSystemAdmin, setIsSystemAdmin] = useState(false)
-  const [hasCtpAccess, setHasCtpAccess] = useState(false)
-  const [error, setError] = useState('')
-  const [saving, setSaving] = useState(false)
-
-  async function save() {
-    setSaving(true); setError('')
-    try {
-      const r = await api.post('/admin/users', {
-        full_name: fullName, username, department: department || null, dept_code: deptCode || null,
-        employment_type: employmentType, reports_to: reportsTo || null,
-        does_timesheets: doesTimesheets, can_approve: canApprove,
-        is_payroll_admin: isPayrollAdmin, is_system_admin: isSystemAdmin,
-        has_ctp_access: hasCtpAccess,
-      })
-      if (r.initial_pin) onCreated({ title: `Initial PIN for ${fullName}`, value: r.initial_pin })
-      else if (r.initial_password) onCreated({ title: `Initial password for ${fullName}`, value: r.initial_password })
-      else onCreated(null)
-    } catch (err) { setError(err.message) } finally { setSaving(false) }
-  }
-
-  return (
-    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal">
-        <h2 style={{ fontSize: 18, marginBottom: 14 }}>New user</h2>
-        {error && <div className="banner banner-error">{error}</div>}
-        <input className="input" placeholder="Full name" value={fullName} onChange={e => setFullName(e.target.value)} style={{ marginBottom: 10 }} />
-        <input className="input" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} style={{ marginBottom: 10 }} />
-        <input className="input" placeholder="Department (e.g. Wiring, Coach Sup)" value={department} onChange={e => setDepartment(e.target.value)} style={{ marginBottom: 10 }} />
-        <DeptCodeSelect value={deptCode} onChange={setDeptCode} />
-        {doesTimesheets && (
-          <select className="input" value={employmentType} onChange={e => setEmploymentType(e.target.value)} style={{ marginBottom: 10 }}>
-            <option value="employee">Employee</option>
-            <option value="contractor">Contractor</option>
-          </select>
-        )}
-        <select className="input" value={reportsTo} onChange={e => setReportsTo(e.target.value)} style={{ marginBottom: 10 }}>
-          <option value="">No line manager</option>
-          {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
-        </select>
-        <CapabilityCheckboxes
-          doesTimesheets={doesTimesheets} setDoesTimesheets={setDoesTimesheets}
-          canApprove={canApprove} setCanApprove={setCanApprove}
-          isPayrollAdmin={isPayrollAdmin} setIsPayrollAdmin={setIsPayrollAdmin}
-          isSystemAdmin={isSystemAdmin} setIsSystemAdmin={setIsSystemAdmin}
-        />
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, fontSize: 14 }}>
-          <input type="checkbox" checked={hasCtpAccess} onChange={e => setHasCtpAccess(e.target.checked)} />
-          CTP access — can log time to CTP builds
-        </label>
-        {(isPayrollAdmin || isSystemAdmin) && (
-          <div className="banner banner-warn" style={{ marginBottom: 14 }}>Admin tier — a password will be generated and shown once; they'll be walked through MFA enrolment (QR code + backup codes) on first sign-in.</div>
-        )}
-        <div style={{ display: 'flex', gap: 10 }}>
-          <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" style={{ flex: 1 }} onClick={save} disabled={saving || !fullName || !username}>
-            {saving ? 'Saving…' : 'Create'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// Working Cost Codes v1.1 §2.5: which catalogue department the person
-// books admin time to — picks their default non-project code (IL-DA for
-// wiring, CL-AD for coachbuild…). Separate from the free-text department.
-function DeptCodeSelect({ value, onChange }) {
-  return (
-    <select className="input" value={value} onChange={e => onChange(e.target.value)} style={{ marginBottom: 10 }}>
-      <option value="">Cost-code department: none</option>
-      <option value="CL">CL · Coachbuild</option>
-      <option value="WW">WW · Woodwork</option>
-      <option value="EL">EL · Engineering</option>
-      <option value="IL">IL · Wiring</option>
-      <option value="PM">PM · Project Management</option>
-    </select>
-  )
-}
-
-function EditUserModal({ user, onClose, onSaved, users }) {
-  const [department, setDepartment] = useState(user.department || '')
-  const [deptCode, setDeptCode] = useState(user.dept_code || '')
-  const [employmentType, setEmploymentType] = useState(user.employment_type || 'employee')
-  const [reportsTo, setReportsTo] = useState(user.reports_to || '')
-  const [canApprove, setCanApprove] = useState(user.can_approve)
-  const [isPayrollAdmin, setIsPayrollAdmin] = useState(user.is_payroll_admin)
-  const [isSystemAdmin, setIsSystemAdmin] = useState(user.is_system_admin)
-  const [hasCtpAccess, setHasCtpAccess] = useState(user.has_ctp_access)
-  const [error, setError] = useState('')
-  const [saving, setSaving] = useState(false)
-
-  async function save() {
-    setSaving(true); setError('')
-    try {
-      const r = await api.patch(`/admin/users/${user.id}`, {
-        department: department || null, dept_code: deptCode || null, employment_type: employmentType, reports_to: reportsTo || null,
-        can_approve: canApprove, is_payroll_admin: isPayrollAdmin, is_system_admin: isSystemAdmin,
-        has_ctp_access: hasCtpAccess,
-      })
-      onSaved(r.initial_password ? { title: `Initial password for ${user.full_name}`, value: r.initial_password } : null)
-    } catch (err) { setError(err.message) } finally { setSaving(false) }
-  }
-
-  return (
-    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal">
-        <h2 style={{ fontSize: 18, marginBottom: 4 }}>Edit {user.full_name}</h2>
-        <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 14 }}>{user.username}</div>
-        {error && <div className="banner banner-error">{error}</div>}
-        <input className="input" placeholder="Department (e.g. Wiring, Coach Sup)" value={department} onChange={e => setDepartment(e.target.value)} style={{ marginBottom: 10 }} />
-        <DeptCodeSelect value={deptCode} onChange={setDeptCode} />
-        <select className="input" value={employmentType} onChange={e => setEmploymentType(e.target.value)} style={{ marginBottom: 10 }}>
-          <option value="employee">Employee</option>
-          <option value="contractor">Contractor</option>
-        </select>
-        <select className="input" value={reportsTo} onChange={e => setReportsTo(e.target.value)} style={{ marginBottom: 10 }}>
-          <option value="">No line manager</option>
-          {user.reports_to && !users.some(u => u.id === user.reports_to) && (
-            <option value={user.reports_to}>{user.reports_to_name || 'Unknown'} (inactive)</option>
-          )}
-          {users.filter(u => u.id !== user.id).map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
-        </select>
-        <CapabilityCheckboxes
-          doesTimesheets={user.does_timesheets} setDoesTimesheets={() => {}}
-          canApprove={canApprove} setCanApprove={setCanApprove}
-          isPayrollAdmin={isPayrollAdmin} setIsPayrollAdmin={setIsPayrollAdmin}
-          isSystemAdmin={isSystemAdmin} setIsSystemAdmin={setIsSystemAdmin}
-        />
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, fontSize: 14 }}>
-          <input type="checkbox" checked={hasCtpAccess} onChange={e => setHasCtpAccess(e.target.checked)} />
-          CTP access — can log time to CTP builds
-        </label>
-        <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 14, marginTop: -8 }}>
-          Does-timesheets isn't editable here — use Reset PIN to (re)issue one, there's no toggle to remove PIN access this batch.
-        </div>
-        <div style={{ display: 'flex', gap: 10 }}>
-          <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" style={{ flex: 1 }} onClick={save} disabled={saving}>
-            {saving ? 'Saving…' : 'Save'}
-          </button>
-        </div>
       </div>
     </div>
   )
@@ -826,6 +619,23 @@ function OutstandingTab() {
           ))}
           {data.outstanding.length === 0 && <div style={{ padding: 16, color: 'var(--text3)' }}>Everyone's submitted for this week.</div>}
         </div>
+      )}
+      {/* Leavers (closed out in QW) with weeks up to their leaving date not
+          submitted: flagged here for Payroll Admin, never deleted (scope 5.2). */}
+      {data?.leavers?.length > 0 && (
+        <>
+          <h3 style={{ fontSize: 15, margin: '20px 0 10px' }}>Leavers with unsubmitted weeks</h3>
+          <div className="card">
+            {data.leavers.map(l => (
+              <div key={l.id} style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ fontWeight: 600 }}>{l.full_name}</span>
+                <span style={{ color: 'var(--text3)' }}>
+                  {l.unsubmitted_weeks} week{l.unsubmitted_weeks === 1 ? '' : 's'} from {l.first_week} · left {l.leave_date} · {l.removed_at ? 'account closed' : `access until ${l.closing_grace_end}`}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
       )}
     </div>
   )

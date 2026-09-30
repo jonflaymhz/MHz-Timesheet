@@ -22,6 +22,10 @@ async function requireAuth(req, res, next) {
       return res.status(403).json({ error: 'Complete MFA enrollment before continuing', mfa_enrollment_required: true });
     }
   }
+  // Closing (User Management scope 3.2): a leaver in their grace period
+  // enters and submits their own time only, so any Approval/Admin role is
+  // set aside until they're reactivated.
+  const closing = !!session.closing_grace_end;
   req.user = {
     id: session.u_id,
     full_name: session.full_name,
@@ -30,9 +34,11 @@ async function requireAuth(req, res, next) {
     department: session.department,
     has_ctp_access: session.has_ctp_access,
     reports_to: session.reports_to,
-    can_approve: session.can_approve,
-    is_payroll_admin: session.is_payroll_admin,
-    is_system_admin: session.is_system_admin,
+    can_approve: session.can_approve && !closing,
+    is_payroll_admin: session.is_payroll_admin && !closing,
+    is_system_admin: session.is_system_admin && !closing,
+    closing_leave_date: session.closing_leave_date || null,
+    closing_grace_end: session.closing_grace_end || null,
   };
   req.sessionToken = token;
   req.pendingMfaEnrollment = !!session.pending_mfa_enrollment;

@@ -14,7 +14,7 @@ const router = express.Router();
 // §2.9), not only the direct manager.
 async function loadWeekWithAuthority(weekId, requester) {
   const result = await db.query(
-    `SELECT tw.*, u.full_name AS owner_full_name FROM timesheet_week tw
+    `SELECT tw.*, u.full_name AS owner_full_name, u.closing_leave_date AS owner_leave_date FROM timesheet_week tw
        JOIN users u ON u.id = tw.user_id WHERE tw.id = $1`,
     [weekId]
   );
@@ -210,6 +210,11 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
   if (!entry_date || entry_date < week.week_start_date || entry_date > week.week_end_date) {
     return res.status(400).json({ error: 'entry_date must fall within this week' });
   }
+  // Closing (User Management scope 3.2): a leaver enters time up to their
+  // leaving date only.
+  if (week.owner_leave_date && entry_date > week.owner_leave_date) {
+    return res.status(400).json({ error: `Leaving date is ${week.owner_leave_date}: time can only be entered up to then` });
+  }
   if (Math.round(Number(hours || 0) * 4) !== Number(hours || 0) * 4) {
     return res.status(400).json({ error: 'Hours must be in 15-minute increments' });
   }
@@ -361,6 +366,11 @@ router.post('/:id/submit', requireAuth, async (req, res) => {
   // Section 10.1: the confirmation is the point, not a formality — enforced
   // server-side so it can't be skipped by calling the API directly.
   if (!req.body?.confirmed) return res.status(400).json({ error: 'Confirmation is required before submitting' });
+  // Closing: only weeks up to the leaving date, and days after it don't count as missing.
+  const leaveDate = week.owner_leave_date || null;
+  if (leaveDate && week.week_start_date > leaveDate) {
+    return res.status(400).json({ error: `Leaving date is ${leaveDate}: weeks after it can't be submitted` });
+  }
 
   const { entries } = await weekWithEntries(week.id);
   const coveredDates = new Set(entries.map(e => e.entry_date));
@@ -372,6 +382,7 @@ router.post('/:id/submit', requireAuth, async (req, res) => {
     const isoDow = ((d.getUTCDay() + 6) % 7) + 1; // Mon=1..Sun=7
     if (!CONTRACTED_WEEKDAYS.includes(isoDow)) continue;
     const key = d.toISOString().slice(0, 10);
+    if (leaveDate && key > leaveDate) continue;
     if (!coveredDates.has(key)) missing.push(key);
   }
   if (missing.length > 0) {
@@ -381,8 +392,10 @@ router.post('/:id/submit', requireAuth, async (req, res) => {
   // leave must not let an unfinished week be submitted early.
   const lastWeekday = new Date(start);
   lastWeekday.setUTCDate(lastWeekday.getUTCDate() + Math.max(...CONTRACTED_WEEKDAYS) - 1);
-  if (lastWeekday.toISOString().slice(0, 10) > wu.londonToday()) {
-    return res.status(400).json({ error: `This week can be submitted from ${lastWeekday.toISOString().slice(0, 10)}, once its working days are done` });
+  let lastDay = lastWeekday.toISOString().slice(0, 10);
+  if (leaveDate && leaveDate < lastDay) lastDay = leaveDate;
+  if (lastDay > wu.londonToday()) {
+    return res.status(400).json({ error: `This week can be submitted from ${lastDay}, once its working days are done` });
   }
 
   const result = await db.query(

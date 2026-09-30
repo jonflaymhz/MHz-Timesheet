@@ -12,8 +12,10 @@ const weeksRoutes = require('./routes/weeks');
 const referenceRoutes = require('./routes/reference');
 const adminRoutes = require('./routes/admin');
 const teamRoutes = require('./routes/team');
+const qwAdminRoutes = require('./routes/qwAdmin');
 const { runHourlySync } = require('./services/qwPull');
 const { runHourlySync: runHourlyCtpSync } = require('./services/ctpPull');
+const { runClosingJob } = require('./services/closingJob');
 
 const app = express();
 
@@ -29,6 +31,8 @@ app.use('/api/weeks', weeksRoutes);
 app.use('/api/reference', referenceRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/team', teamRoutes);
+// User admin from QW Admin > Users (User Management scope 3.6); own secret.
+app.use('/api/integrations/qw', qwAdminRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
@@ -64,5 +68,13 @@ cron.schedule('0 * * * *', () => {
 });
 // Run both once at startup too, so a freshly deployed instance isn't empty
 // for up to an hour.
+// Leavers whose close-out grace period has ended (User Management scope 5.2).
+// Daily just after 02:00 (server local time, BST/GMT), and once at startup
+// so a restart never skips a day.
+cron.schedule('5 2 * * *', () => {
+  runClosingJob().catch(err => console.error('Closing job failed:', err.message));
+});
+runClosingJob().catch(err => console.error('Startup closing job failed:', err.message));
+
 runHourlySync().catch(err => console.error('Startup QW sync failed:', err.message));
 runHourlyCtpSync().catch(err => console.error('Startup CTP sync failed:', err.message));
