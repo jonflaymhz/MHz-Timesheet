@@ -65,6 +65,17 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
 // Auto-generates the initial PIN/password rather than letting the admin
 // type one (admin scope Section 3.2) — either or both may apply, since a
 // person can be an Entry account and elevated-tier at the same time.
+// A line manager must be a live user (not frozen or removed) and not the
+// person themselves. Returns an error message, or null if the value is OK.
+async function checkReportsTo(reportsTo, selfId = null) {
+  if (!reportsTo) return null;
+  if (selfId && reportsTo === selfId) return 'A user cannot report to themselves';
+  const r = await db.query(`SELECT is_active, removed_at FROM users WHERE id = $1`, [reportsTo]);
+  if (!r.rows[0]) return 'Line manager not found';
+  if (!r.rows[0].is_active || r.rows[0].removed_at) return 'Line manager must be an active user';
+  return null;
+}
+
 router.post('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   const { full_name, username, department, employment_type, reports_to, does_timesheets, can_approve, is_payroll_admin, is_system_admin, has_ctp_access } = req.body;
   const deptCode = cleanDeptCode(req.body.dept_code);
@@ -72,6 +83,8 @@ router.post('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   if (!full_name || !username) {
     return res.status(400).json({ error: 'full_name and username are required' });
   }
+  const reportsToError = await checkReportsTo(reports_to);
+  if (reportsToError) return res.status(400).json({ error: reportsToError });
   // Elevated tier (Section 3.1): Approval and either Admin role all require
   // password + MFA, not just the two admin flags.
   const isElevatedTier = !!can_approve || !!is_payroll_admin || !!is_system_admin;
@@ -109,6 +122,14 @@ router.patch('/users/:id', requireAuth, requireSystemAdmin, async (req, res) => 
   if (req.body.dept_code && deptCode === undefined) return res.status(400).json({ error: `dept_code must be one of ${DEPT_CODES.join(', ')}` });
   const before = (await db.query(`SELECT * FROM users WHERE id = $1`, [req.params.id])).rows[0];
   if (!before) return res.status(404).json({ error: 'User not found' });
+  // Omitting reports_to keeps the current line manager (only an explicit
+  // null/'' clears it). Only a changed value is validated, so editing someone
+  // whose existing manager has since left doesn't fail.
+  const nextReportsTo = reports_to === undefined ? before.reports_to : (reports_to || null);
+  if (nextReportsTo !== before.reports_to) {
+    const reportsToError = await checkReportsTo(nextReportsTo, before.id);
+    if (reportsToError) return res.status(400).json({ error: reportsToError });
+  }
 
   // Elevated tier (Section 3.1): Approval and either Admin role all require
   // password + MFA, not just the two admin flags.
@@ -135,7 +156,7 @@ router.patch('/users/:id', requireAuth, requireSystemAdmin, async (req, res) => 
             updated_at = NOW()
       WHERE id = $1
       RETURNING id, full_name, department, dept_code, employment_type, reports_to, can_approve, is_payroll_admin, is_system_admin, has_ctp_access`,
-    [req.params.id, department, employment_type, reports_to || null, can_approve, is_payroll_admin, is_system_admin, passwordHash, has_ctp_access,
+    [req.params.id, department, employment_type, nextReportsTo, can_approve, is_payroll_admin, is_system_admin, passwordHash, has_ctp_access,
       deptCode !== undefined, deptCode ?? null]
   );
 

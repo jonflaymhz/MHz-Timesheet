@@ -66,6 +66,7 @@ function capabilityLabels(u) {
 
 function UsersTab() {
   const [users, setUsers] = useState([])
+  const [managerOptions, setManagerOptions] = useState([])
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('')
   const [capability, setCapability] = useState('')
@@ -80,6 +81,10 @@ function UsersTab() {
     if (status) params.set('status', status)
     if (capability) params.set('capability', capability)
     api.get(`/admin/users${params.toString() ? `?${params}` : ''}`).then(setUsers).catch(e => setError(e.message))
+    // Line-manager picker always offers active users only, regardless of the
+    // list filter above (a filtered subset, or frozen/removed people, would
+    // otherwise be offered as managers).
+    api.get('/admin/users?status=active').then(setManagerOptions).catch(e => setError(e.message))
   }
   useEffect(load, [q, status, capability])
 
@@ -188,7 +193,7 @@ function UsersTab() {
         <NewUserModal
           onClose={() => setShowNew(false)}
           onCreated={(secretResult) => { setShowNew(false); load(); if (secretResult) setSecret(secretResult) }}
-          users={users}
+          users={managerOptions}
         />
       )}
       {editing && (
@@ -196,7 +201,7 @@ function UsersTab() {
           user={editing}
           onClose={() => setEditing(null)}
           onSaved={(secretResult) => { setEditing(null); load(); if (secretResult) setSecret(secretResult) }}
-          users={users}
+          users={managerOptions}
         />
       )}
       {secret && <SecretRevealModal {...secret} onClose={() => setSecret(null)} />}
@@ -377,6 +382,9 @@ function EditUserModal({ user, onClose, onSaved, users }) {
         </select>
         <select className="input" value={reportsTo} onChange={e => setReportsTo(e.target.value)} style={{ marginBottom: 10 }}>
           <option value="">No line manager</option>
+          {user.reports_to && !users.some(u => u.id === user.reports_to) && (
+            <option value={user.reports_to}>{user.reports_to_name || 'Unknown'} (inactive)</option>
+          )}
           {users.filter(u => u.id !== user.id).map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
         </select>
         <CapabilityCheckboxes

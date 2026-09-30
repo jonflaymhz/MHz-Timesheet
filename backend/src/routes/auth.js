@@ -31,7 +31,7 @@ function setSessionCookie(req, res, token, expiresAt) {
 // shared kiosk has no password/TOTP fields to fall back to.
 router.get('/kiosk-users', async (req, res) => {
   const result = await db.query(
-    `SELECT id, full_name FROM users
+    `SELECT id, full_name, username FROM users
       WHERE is_active = TRUE AND pin_hash IS NOT NULL AND pin_locked_at IS NULL
         AND NOT can_approve AND NOT is_payroll_admin AND NOT is_system_admin
       ORDER BY full_name`
