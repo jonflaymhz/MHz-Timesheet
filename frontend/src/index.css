@@ -107,6 +107,12 @@ input, select { font-family: var(--font); font-size: 16px; }
   .modal { border-radius: var(--r2); }
 }
 
+/* Name-tile kiosk: one column per kiosk group (User Management scope 3.5) */
+.kiosk-groups { display: flex; flex-wrap: wrap; gap: 18px; justify-content: center; align-items: flex-start; }
+.kiosk-group { display: flex; flex-direction: column; gap: 10px; min-width: 130px; flex: 0 1 150px; }
+.kiosk-group-title { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text3); text-align: center; }
+.kiosk-group .name-tile { padding: 16px 10px; }
+
 /* Name-tile kiosk grid */
 .tile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 14px; }
 .name-tile {

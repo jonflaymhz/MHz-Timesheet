@@ -78,7 +78,8 @@ function UsersTab() {
   function load() {
     const params = new URLSearchParams()
     if (q) params.set('q', q)
-    if (status) params.set('status', status)
+    if (status === 'all') params.set('include_inactive', '1')
+    else if (status) params.set('status', status)
     if (capability) params.set('capability', capability)
     api.get(`/admin/users${params.toString() ? `?${params}` : ''}`).then(setUsers).catch(e => setError(e.message))
     // Line-manager picker always offers active users only, regardless of the
@@ -137,7 +138,8 @@ function UsersTab() {
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
         <input className="input" placeholder="Search by name or username…" value={q} onChange={e => setQ(e.target.value)} style={{ maxWidth: 260 }} />
         <select className="input" value={status} onChange={e => setStatus(e.target.value)} style={{ maxWidth: 160 }}>
-          <option value="">Any status</option>
+          <option value="">Active &amp; frozen</option>
+          <option value="all">All, incl. removed</option>
           <option value="active">Active</option>
           <option value="frozen">Frozen</option>
           <option value="removed">Removed</option>
@@ -163,7 +165,7 @@ function UsersTab() {
                   ))}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text3)' }}>
-                  {u.username}{u.department ? ` · ${u.department}` : ''}{u.dept_code ? ` (${u.dept_code})` : ''} · Reports to: {u.reports_to_name || '—'}
+                  {u.username}{u.short_name ? ` · ${u.short_name}` : ''}{u.department ? ` · ${u.department}` : ''}{u.dept_code ? ` (${u.dept_code})` : ''} · Kiosk group: {u.kiosk_group || 'Other'} · Reports to: {u.reports_to_name || '—'}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text3)' }}>
                   {u.does_timesheets ? 'Has PIN' : 'No timesheet account'}

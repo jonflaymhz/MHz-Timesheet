@@ -38,6 +38,9 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   if (req.query.status === 'active') clauses.push(`u.is_active = TRUE AND u.removed_at IS NULL`);
   if (req.query.status === 'frozen') clauses.push(`u.is_active = FALSE AND u.removed_at IS NULL`);
   if (req.query.status === 'removed') clauses.push(`u.removed_at IS NOT NULL`);
+  // Removed (inactive) users are left out unless asked for (scope 3.3):
+  // ?status=removed, or ?include_inactive=1 for everyone.
+  if (!req.query.status && req.query.include_inactive !== '1') clauses.push(`u.removed_at IS NULL`);
   if (req.query.capability === 'approval') clauses.push(`u.can_approve = TRUE`);
   if (req.query.capability === 'payroll_admin') clauses.push(`u.is_payroll_admin = TRUE`);
   if (req.query.capability === 'system_admin') clauses.push(`u.is_system_admin = TRUE`);
@@ -48,7 +51,7 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
   const result = await db.query(
-    `SELECT u.id, u.full_name, u.username, u.department, u.dept_code, u.employment_type,
+    `SELECT u.id, u.full_name, u.short_name, u.kiosk_group, u.username, u.department, u.dept_code, u.employment_type,
             u.reports_to, r.full_name AS reports_to_name,
             u.can_approve, u.is_payroll_admin, u.is_system_admin, u.has_ctp_access,
             u.is_active, u.removed_at, u.pin_locked_at, u.mfa_enabled, u.last_login_at,

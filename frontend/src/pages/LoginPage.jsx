@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 import { useAutofocusOnVisible } from '../hooks/useAutofocusOnVisible.js'
+import { groupForKiosk } from '../lib/kioskGroups.js'
 
 // One login page for everyone (Admin Scope Section 3.1) — no separate
 // admin/Jonny front door to find. Username is entered first; the account's
@@ -100,12 +101,17 @@ export default function LoginPage() {
       <div className="page" style={{ paddingTop: 40 }}>
         <h1 style={{ textAlign: 'center', marginBottom: 6 }}>Who's this?</h1>
         <p style={{ textAlign: 'center', color: 'var(--text2)', marginBottom: 24 }}>Tap your name, then enter your PIN</p>
-        <div className="tile-grid">
-          {kioskUsers.map(u => (
-            <button key={u.id} className="name-tile" onClick={() => { setSelectedUsername(u.username); setSelectedName(u.full_name) }}>
-              <div className="name-tile-avatar">{u.full_name.charAt(0)}</div>
-              {u.full_name}
-            </button>
+        <div className="kiosk-groups">
+          {groupForKiosk(kioskUsers).map(({ group, people }) => (
+            <div key={group} className="kiosk-group">
+              <div className="kiosk-group-title">{group}</div>
+              {people.map(u => (
+                <button key={u.id} className="name-tile" onClick={() => { setSelectedUsername(u.username); setSelectedName(u.full_name) }}>
+                  <div className="name-tile-avatar">{(u.short_name || u.full_name).charAt(0)}</div>
+                  {u.short_name || u.full_name}
+                </button>
+              ))}
+            </div>
           ))}
         </div>
         <div style={{ textAlign: 'center', marginTop: 24 }}>
