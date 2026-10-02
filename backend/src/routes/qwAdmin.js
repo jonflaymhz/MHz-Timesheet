@@ -267,4 +267,34 @@ router.put('/users/:qwUserId', async (req, res) => {
   }
 });
 
+// POST /users/:qwUserId/reset-mfa { actor_qw_user_id } -- MFA Recovery v1.0:
+// QW Admin > Users resets Timesheet MFA through the link, same effects as
+// Timesheet's own Admin reset: secret and backup codes cleared, sessions
+// revoked, enrolment forced at next sign-in, audit row. QW checks the actor
+// is an admin; this refuses a self-reset as a second line.
+router.post('/users/:qwUserId/reset-mfa', async (req, res) => {
+  const actorQw = req.body?.actor_qw_user_id ? Number(req.body.actor_qw_user_id) : null;
+  if (actorQw && actorQw === Number(req.params.qwUserId)) {
+    return res.status(403).json({ error: 'An admin cannot reset their own MFA. Ask another admin.' });
+  }
+  const row = (await db.query(`SELECT id, full_name, mfa_enabled, mfa_secret FROM users WHERE qw_user_id = $1`, [req.params.qwUserId])).rows[0];
+  if (!row) return res.status(404).json({ error: 'No Timesheet user for this QW user', not_linked: true });
+  if (!row.mfa_enabled && !row.mfa_secret) return res.json({ status: 'nothing_to_reset', full_name: row.full_name });
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    await client.query(`UPDATE users SET mfa_enabled = FALSE, mfa_secret = NULL WHERE id = $1`, [row.id]);
+    await client.query(`DELETE FROM user_mfa_backup_codes WHERE user_id = $1`, [row.id]);
+    await client.query(`UPDATE user_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`, [row.id]);
+    await audit(client, 'reset_mfa', row.id, await actorId(client, actorQw), { mfa_enabled: row.mfa_enabled }, { mfa_enabled: false });
+    await client.query('COMMIT');
+    res.json({ status: 'reset', full_name: row.full_name });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 module.exports = router;

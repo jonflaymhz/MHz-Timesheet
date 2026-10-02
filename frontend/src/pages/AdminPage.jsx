@@ -169,7 +169,7 @@ function UsersTab() {
                 {u.pin_locked_at && <button className="btn btn-danger btn-sm" onClick={() => unlock(u.id)}>Unlock PIN</button>}
                 {u.does_timesheets && <button className="btn btn-ghost btn-sm" onClick={() => resetPin(u)}>Reset PIN</button>}
                 {(u.can_approve || u.is_payroll_admin || u.is_system_admin) && <button className="btn btn-ghost btn-sm" onClick={() => resetPassword(u)}>Reset password</button>}
-                {(u.is_payroll_admin || u.is_system_admin) && u.mfa_enabled && <button className="btn btn-ghost btn-sm" onClick={() => resetMfa(u)}>Reset MFA</button>}
+                {(u.can_approve || u.is_payroll_admin || u.is_system_admin) && u.mfa_enabled && u.id !== user?.id && <button className="btn btn-ghost btn-sm" onClick={() => resetMfa(u)}>Reset MFA</button>}
                 {u.status === 'closing' && (
                   <span style={{ fontSize: 12, color: 'var(--text3)', alignSelf: 'center' }}>Leaving {u.closing_leave_date} · access until {u.closing_grace_end}</span>
                 )}

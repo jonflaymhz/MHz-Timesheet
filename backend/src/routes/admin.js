@@ -301,6 +301,8 @@ router.post('/users/:id/reset-password', requireAuth, requireSystemAdmin, async 
 // only reset by another admin") — clears the secret and backup codes so
 // the next elevated-tier login naturally re-enters the enrollment flow.
 router.post('/users/:id/reset-mfa', requireAuth, requireSystemAdmin, async (req, res) => {
+  // MFA Recovery v1.0 §4: another admin must do it.
+  if (String(req.params.id) === String(req.user.id)) return res.status(403).json({ error: 'You cannot reset your own MFA. Ask another admin.' });
   const existing = (await db.query(`SELECT can_approve, is_payroll_admin, is_system_admin, full_name FROM users WHERE id = $1`, [req.params.id])).rows[0];
   if (!existing) return res.status(404).json({ error: 'User not found' });
   if (!existing.can_approve && !existing.is_payroll_admin && !existing.is_system_admin) {
