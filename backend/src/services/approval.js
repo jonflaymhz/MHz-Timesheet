@@ -4,7 +4,9 @@
 // Approval and is active; otherwise the first active Approval-holder
 // further up the reports_to chain. System and Payroll admins can approve
 // any week as a fallback, recorded as an admin approval. Nobody approves a
-// week they entered hours on (their own week, or a week they proxy-entered).
+// week they entered hours on (their own week, or a week they proxy-entered),
+// except their own week when they have can_self_approve (Self-Approval
+// v1.0), recorded as a self-approval.
 const db = require('../db/pool');
 
 const SELF_ENTERED_NOTE = 'You entered hours on this week, another approver is needed';
@@ -51,6 +53,7 @@ async function approvalDecision(week, requester) {
   const approver = await resolveApprover(week.user_id);
   const base = { approver_id: approver?.id || null, approver_name: approver?.full_name || null };
   if (week.user_id === requester.id) {
+    if (requester.can_self_approve) return { ...base, allowed: true, path: 'self' };
     return { ...base, allowed: false, reason: "You can't approve your own week" };
   }
   const entered = await db.query(

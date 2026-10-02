@@ -40,7 +40,7 @@ const USER_SELECT = `
          u.department, u.dept_code, u.employment_type, u.reports_to, r.qw_user_id AS reports_to_qw_user_id,
          r.full_name AS reports_to_name,
          (u.pin_hash IS NOT NULL) AS does_timesheets, u.can_approve, u.is_payroll_admin, u.is_system_admin,
-         u.has_ctp_access, u.is_active, u.removed_at, u.closing_leave_date, u.closing_grace_end,
+         u.has_ctp_access, u.can_self_approve, u.is_active, u.removed_at, u.closing_leave_date, u.closing_grace_end,
          u.mfa_enabled, u.last_login_at
     FROM users u LEFT JOIN users r ON r.id = u.reports_to`;
 
@@ -125,6 +125,8 @@ router.put('/users/:qwUserId', async (req, res) => {
     for (const k of ['does_timesheets', 'can_approve', 'is_payroll_admin', 'is_system_admin', 'has_ctp_access']) {
       if (typeof t[k] !== 'boolean') return res.status(400).json({ error: `timesheet.${k} must be true or false (full record required)` });
     }
+    // Optional so an older QW build that doesn't send it can't clear it.
+    if (t.can_self_approve !== undefined && typeof t.can_self_approve !== 'boolean') return res.status(400).json({ error: 'timesheet.can_self_approve must be true or false' });
     if (t.dept_code && !DEPT_CODES.includes(t.dept_code)) return res.status(400).json({ error: 'Invalid dept_code' });
     if (t.employment_type && !['employee', 'contractor'].includes(t.employment_type)) return res.status(400).json({ error: 'Invalid employment_type' });
   }
@@ -170,10 +172,10 @@ router.put('/users/:qwUserId', async (req, res) => {
     if (!before) {
       row = (await client.query(
         `INSERT INTO users (qw_user_id, username, full_name, short_name, kiosk_group, department, dept_code, employment_type,
-                            reports_to, pin_hash, password_hash, can_approve, is_payroll_admin, is_system_admin, has_ctp_access)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+                            reports_to, pin_hash, password_hash, can_approve, is_payroll_admin, is_system_admin, has_ctp_access, can_self_approve)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
         [qwUserId, username, fullName, shortName, b.kiosk_group, t.department || null, t.dept_code || null, t.employment_type || 'employee',
-          reportsTo, pinHash, passwordHash, t.can_approve, t.is_payroll_admin, t.is_system_admin, t.has_ctp_access]
+          reportsTo, pinHash, passwordHash, t.can_approve, t.is_payroll_admin, t.is_system_admin, t.has_ctp_access, !!(t.can_self_approve && t.can_approve)]
       )).rows[0];
       await audit(client, 'create_user', row.id, performedBy, null, { username, full_name: fullName });
     } else {
@@ -181,16 +183,17 @@ router.put('/users/:qwUserId', async (req, res) => {
         `UPDATE users SET username = $2, full_name = $3, short_name = $4, kiosk_group = $5,
                 department = $6, dept_code = $7, employment_type = $8, reports_to = $9,
                 pin_hash = $10, password_hash = $11, can_approve = $12, is_payroll_admin = $13,
-                is_system_admin = $14, has_ctp_access = $15, updated_at = NOW()
+                is_system_admin = $14, has_ctp_access = $15, can_self_approve = $16, updated_at = NOW()
           WHERE id = $1 RETURNING *`,
         [before.id, username, fullName, shortName, b.kiosk_group,
           t ? (t.department || null) : before.department, t ? (t.dept_code || null) : before.dept_code,
           t ? (t.employment_type || 'employee') : before.employment_type, reportsTo, pinHash, passwordHash,
           t ? t.can_approve : before.can_approve, t ? t.is_payroll_admin : before.is_payroll_admin,
-          t ? t.is_system_admin : before.is_system_admin, t ? t.has_ctp_access : before.has_ctp_access]
+          t ? t.is_system_admin : before.is_system_admin, t ? t.has_ctp_access : before.has_ctp_access,
+          !!((t && t.can_self_approve !== undefined ? t.can_self_approve : before.can_self_approve) && (t ? t.can_approve : before.can_approve))]
       )).rows[0];
       const keys = ['username', 'full_name', 'short_name', 'kiosk_group', 'department', 'dept_code', 'employment_type', 'reports_to',
-        'can_approve', 'is_payroll_admin', 'is_system_admin', 'has_ctp_access'];
+        'can_approve', 'can_self_approve', 'is_payroll_admin', 'is_system_admin', 'has_ctp_access'];
       const changed = keys.filter(k => String(before[k]) !== String(row[k]));
       if ((before.pin_hash === null) !== (row.pin_hash === null)) changed.push('does_timesheets');
       if (changed.length) {

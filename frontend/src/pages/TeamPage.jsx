@@ -45,13 +45,16 @@ export default function TeamPage() {
         {awaiting.map(w => (
           <div key={w.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid var(--border)', gap: 10 }}>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontWeight: 600 }}>{w.full_name}</div>
+              <div style={{ fontWeight: 600 }}>
+                {w.full_name}
+                {w.path === 'self' && <span className="tag tag-submitted" style={{ marginLeft: 8 }}>Your timesheet</span>}
+              </div>
               <div style={{ fontSize: 12, color: 'var(--text3)' }}>
                 Week {w.week_number} · {Number(w.total_hours)}h{w.path === 'admin' ? ' · no approver in chain, admin fallback' : ''}
                 {w.entered_by_me && <span style={{ color: 'var(--amber)', fontWeight: 600 }}> · you entered hours, another approver is needed</span>}
               </div>
             </div>
-            <Link to={`/?for=${w.user_id}&week_start=${String(w.week_start_date).slice(0, 10)}`} className="btn btn-ghost btn-sm">Review</Link>
+            <Link to={w.path === 'self' ? `/?week_start=${String(w.week_start_date).slice(0, 10)}` : `/?for=${w.user_id}&week_start=${String(w.week_start_date).slice(0, 10)}`} className="btn btn-ghost btn-sm">Review</Link>
           </div>
         ))}
         {awaiting.length === 0 && <div style={{ padding: 16, color: 'var(--text3)' }}>Nothing waiting.</div>}

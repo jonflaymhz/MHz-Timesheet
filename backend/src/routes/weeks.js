@@ -146,7 +146,9 @@ router.get('/mine', requireAuth, async (req, res) => {
   // needs those to know what to offer, and getOrCreateWeek's plain
   // `SELECT * FROM timesheet_week` never joins to users at all.
   const { week, entries } = await weekWithEntries(created.id);
-  res.json({ week, entries });
+  // approval: Self-Approval v1.0, so someone allowed to approve their own
+  // week gets the Approve panel on it.
+  res.json({ week, entries, approval: await approvalDecision(week, req.user) });
 });
 
 // ── GET /api/weeks/for/:userId ──────────────────────────────────
@@ -442,6 +444,7 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
       confirmation_text: "I've reviewed and confirm these hours as real.",
       approval_path: decision.path,
       ...(decision.path === 'admin' ? { admin_approval: true, resolved_approver: decision.approver_name } : {}),
+      ...(decision.path === 'self' ? { self_approval: true } : {}),
     })]
   );
   // No automatic QW push here any more (Actual Hours Feedback Design v1.0

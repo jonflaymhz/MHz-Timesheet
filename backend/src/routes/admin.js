@@ -56,7 +56,7 @@ router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   const result = await db.query(
     `SELECT u.id, u.qw_user_id, u.full_name, u.short_name, u.kiosk_group, u.username, u.department, u.dept_code, u.employment_type,
             u.reports_to, r.full_name AS reports_to_name,
-            u.can_approve, u.is_payroll_admin, u.is_system_admin, u.has_ctp_access,
+            u.can_approve, u.can_self_approve, u.is_payroll_admin, u.is_system_admin, u.has_ctp_access,
             u.is_active, u.removed_at, u.closing_leave_date, u.closing_grace_end, u.pin_locked_at, u.mfa_enabled, u.last_login_at,
             (u.pin_hash IS NOT NULL) AS does_timesheets
        FROM users u
@@ -541,6 +541,8 @@ router.get('/reports/ctp-hours', requireAuth, requireSystemAdmin, async (req, re
 router.get('/weeks/search', requireAuth, requireOverrideAuthority, async (req, res) => {
   const params = [];
   let where = "tw.status = 'approved'";
+  // Self-Approval v1.0 §5: Payroll can pick out self-approved weeks.
+  if (req.query.self_approved === '1') where += ' AND tw.approved_by = tw.user_id';
   if (req.query.person) {
     params.push(`%${req.query.person}%`);
     where += ` AND u.full_name ILIKE $${params.length}`;
@@ -550,7 +552,7 @@ router.get('/weeks/search', requireAuth, requireOverrideAuthority, async (req, r
     where += ` AND tw.week_start_date = $${params.length}`;
   }
   const result = await db.query(
-    `SELECT tw.*, u.full_name FROM timesheet_week tw JOIN users u ON u.id = tw.user_id
+    `SELECT tw.*, u.full_name, (tw.approved_by = tw.user_id) AS self_approved FROM timesheet_week tw JOIN users u ON u.id = tw.user_id
       WHERE ${where} ORDER BY tw.week_start_date DESC`,
     params
   );
@@ -641,6 +643,7 @@ router.post('/weeks/:id/approve', requireAuth, requireOverrideAuthority, async (
     [req.params.id, req.user.id, JSON.stringify({
       confirmed: true, confirmation_text: "I've reviewed and confirm these hours as real.",
       approval_path: 'admin_override', admin_approval: true, from_status: week.status, resolved_approver: decision.approver_name,
+      ...(decision.path === 'self' ? { self_approval: true } : {}),
     })]
   );
   // No automatic QW push here any more (Actual Hours Feedback Design v1.0

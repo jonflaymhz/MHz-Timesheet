@@ -35,6 +35,8 @@ async function requireAuth(req, res, next) {
     has_ctp_access: session.has_ctp_access,
     reports_to: session.reports_to,
     can_approve: session.can_approve && !closing,
+    // Self-Approval v1.0: own week only, and only alongside Approval.
+    can_self_approve: session.can_self_approve && session.can_approve && !closing,
     is_payroll_admin: session.is_payroll_admin && !closing,
     is_system_admin: session.is_system_admin && !closing,
     closing_leave_date: session.closing_leave_date || null,

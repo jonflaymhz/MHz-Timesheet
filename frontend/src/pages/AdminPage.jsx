@@ -63,7 +63,8 @@ export default function AdminPage() {
 // ── Users ─────────────────────────────────────────────────────
 function capabilityLabels(u) {
   const labels = []
-  if (u.can_approve) labels.push('Approval')
+  if (u.can_approve) labels.push("Approves team's timesheets")
+  if (u.can_approve && u.can_self_approve) labels.push('Approves own timesheet')
   if (u.is_payroll_admin) labels.push('Payroll admin')
   if (u.is_system_admin) labels.push('System admin')
   if (u.has_ctp_access) labels.push('CTP access')
@@ -135,7 +136,7 @@ function UsersTab() {
         </select>
         <select className="input" value={capability} onChange={e => setCapability(e.target.value)} style={{ maxWidth: 200 }}>
           <option value="">Any capability</option>
-          <option value="approval">Approval</option>
+          <option value="approval">Approves team's timesheets</option>
           <option value="payroll_admin">Payroll admin</option>
           <option value="system_admin">System admin</option>
         </select>
@@ -444,6 +445,7 @@ function CostCodesTab() {
 // ── Override tools: Correct / Unsubmit (Section 5) ──────────────
 function OverridesTab() {
   const [person, setPerson] = useState('')
+  const [selfOnly, setSelfOnly] = useState(false)
   const [weeks, setWeeks] = useState([])
   const [expanded, setExpanded] = useState(null) // week id whose entries are shown
   const [weekDetail, setWeekDetail] = useState(null)
@@ -452,9 +454,12 @@ function OverridesTab() {
   const [error, setError] = useState('')
 
   function search() {
-    api.get(`/admin/weeks/search${person ? `?person=${encodeURIComponent(person)}` : ''}`).then(setWeeks).catch(e => setError(e.message))
+    const q = new URLSearchParams()
+    if (person) q.set('person', person)
+    if (selfOnly) q.set('self_approved', '1')
+    api.get(`/admin/weeks/search${q.toString() ? `?${q}` : ''}`).then(setWeeks).catch(e => setError(e.message))
   }
-  useEffect(search, [])
+  useEffect(search, [selfOnly])
 
   async function expand(weekId) {
     if (expanded === weekId) { setExpanded(null); setWeekDetail(null); return }
@@ -484,13 +489,19 @@ function OverridesTab() {
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
         <input className="input" placeholder="Search by person…" value={person} onChange={e => setPerson(e.target.value)} />
         <button className="btn btn-ghost" onClick={search}>Search</button>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, whiteSpace: 'nowrap' }}>
+          <input type="checkbox" checked={selfOnly} onChange={e => setSelfOnly(e.target.checked)} /> Self-approved only
+        </label>
       </div>
       <div className="card">
         {weeks.map(w => (
           <div key={w.id} style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <div style={{ fontWeight: 600 }}>{w.full_name} — Wk {w.week_number}</div>
+                <div style={{ fontWeight: 600 }}>
+                  {w.full_name} — Wk {w.week_number}
+                  {w.self_approved && <span className="tag tag-submitted" style={{ marginLeft: 8 }} title="Approved by the person themselves">Self-approved</span>}
+                </div>
                 <div style={{ fontSize: 12, color: 'var(--text3)' }}>{w.week_start_date} to {w.week_end_date}</div>
               </div>
               <div style={{ display: 'flex', gap: 8 }}>

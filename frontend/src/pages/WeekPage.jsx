@@ -106,7 +106,10 @@ export default function WeekPage() {
   // The server decides who may approve (Working Cost Codes v1.1 §2.9/§2.10):
   // the resolved approver, or an admin as fallback, and never someone who
   // entered hours on the week. Anyone with approval access sees why not.
-  const canReview = isProxyView && week.status === 'submitted' && canApprove(user) && !!approval
+  // Self-Approval v1.0: someone allowed to approve their own week reviews it
+  // here too (the server says so with path 'self').
+  const isSelfReview = !isProxyView && week.status === 'submitted' && approval?.allowed && approval.path === 'self'
+  const canReview = (isProxyView && week.status === 'submitted' && canApprove(user) && !!approval) || isSelfReview
   const approveBlocked = canReview && !approval.allowed
 
   return (
@@ -176,6 +179,11 @@ export default function WeekPage() {
               <input type="checkbox" checked={confirmApprove} onChange={e => setConfirmApprove(e.target.checked)} />
               I've reviewed and confirm these hours as real.
             </label>
+          )}
+          {isSelfReview && (
+            <div className="banner banner-info" style={{ marginTop: 16, marginBottom: 0 }}>
+              This is your own timesheet. You're allowed to approve it yourself; it's recorded as a self-approval and Payroll can see it.
+            </div>
           )}
           {approval.allowed && approval.path === 'admin' && (
             <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 4 }}>

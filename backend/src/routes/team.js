@@ -47,7 +47,8 @@ router.get('/reports', requireAuth, requireApprovalAuthority, async (req, res) =
 // Every submitted week, any week number, that this person is the resolved
 // approver for. Admins also get the weeks whose chain has no approver at
 // all (their fallback, §2.9). Weeks the viewer entered hours on are
-// flagged, since they can't approve those (§2.10).
+// flagged, since they can't approve those (§2.10). Someone with
+// can_self_approve also gets their own submitted weeks, path 'self'.
 router.get('/awaiting-approval', requireAuth, requireApprovalAuthority, async (req, res) => {
   const isAdmin = req.user.is_payroll_admin || req.user.is_system_admin;
   const approvees = await approveesOf(req.user.id);
@@ -57,12 +58,13 @@ router.get('/awaiting-approval', requireAuth, requireApprovalAuthority, async (r
             EXISTS (SELECT 1 FROM timesheet_entry te WHERE te.week_id = tw.id AND te.entered_by = $1) AS entered_by_me
        FROM timesheet_week tw
        JOIN users u ON u.id = tw.user_id
-      WHERE tw.status = 'submitted' AND tw.user_id <> $1
+      WHERE tw.status = 'submitted' AND (tw.user_id <> $1 OR $2)
       ORDER BY tw.week_start_date DESC, u.full_name`,
-    [req.user.id]
+    [req.user.id, !!req.user.can_self_approve]
   );
   const rows = [];
   for (const r of result.rows) {
+    if (r.user_id === req.user.id) { rows.push({ ...r, path: 'self', entered_by_me: false }); continue; }
     if (approvees.includes(r.user_id)) { rows.push({ ...r, path: 'approver' }); continue; }
     if (isAdmin && !(await resolveApprover(r.user_id))) rows.push({ ...r, path: 'admin' });
   }
