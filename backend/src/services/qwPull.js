@@ -5,13 +5,43 @@
 
 const db = require('../db/pool');
 
+// A QW restart (deploy) answers 502 for a few seconds; without a retry the
+// pull logged an error and left projects/rates stale for an hour (Minor
+// Fixes Batch 2, item 1). On a 5xx, timeout or connection error, retry after
+// 30s, 60s, 120s. A 4xx (e.g. bad secret) won't fix itself, so no retry.
+// QW_PULL_RETRY_DELAYS_MS overrides the delays (QA only).
+const RETRY_DELAYS_MS = (process.env.QW_PULL_RETRY_DELAYS_MS || '30000,60000,120000')
+  .split(',').map(Number).filter(n => n >= 0);
+const REQUEST_TIMEOUT_MS = 20000;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Returns { data, retries } where retries lists what each failed attempt hit.
 async function fetchFromQW(path) {
-  const res = await fetch(`${process.env.QW_API_BASE_URL}/integrations/timesheet/${path}`, {
-    headers: { 'x-sync-secret': process.env.QW_SYNC_SHARED_SECRET },
-  });
-  if (!res.ok) throw new Error(`QW responded ${res.status} for ${path}`);
-  return res.json();
+  const retries = [];
+  for (let attempt = 0; ; attempt++) {
+    let failure;
+    try {
+      const res = await fetch(`${process.env.QW_API_BASE_URL}/integrations/timesheet/${path}`, {
+        headers: { 'x-sync-secret': process.env.QW_SYNC_SHARED_SECRET },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      if (res.ok) return { data: await res.json(), retries };
+      if (res.status < 500) throw Object.assign(new Error(`QW responded ${res.status} for ${path}`), { final: true });
+      failure = String(res.status);
+    } catch (err) {
+      if (err.final) throw err;
+      failure = err.name === 'TimeoutError' ? 'timeout' : `connection error (${err.cause?.code || err.message})`;
+    }
+    if (attempt >= RETRY_DELAYS_MS.length) {
+      throw new Error(`QW responded ${failure} for ${path}${retries.length ? ` after ${retries.length} retries (${retries.join(', ')})` : ''}`);
+    }
+    retries.push(failure);
+    console.warn(`QW pull ${path}: ${failure}, retry ${attempt + 1} of ${RETRY_DELAYS_MS.length} in ${RETRY_DELAYS_MS[attempt] / 1000}s`);
+    await sleep(RETRY_DELAYS_MS[attempt]);
+  }
 }
+
+const retryNote = retries => (retries.length ? `; succeeded after ${retries.length} ${retries.length === 1 ? 'retry' : 'retries'} (${retries.join(', ')})` : '');
 
 async function logSync(type, status, detail, startedAt) {
   await db.query(
@@ -31,7 +61,7 @@ const ABSENT_CLOSE_REASON = 'No longer sent by QW';
 async function pullProjects() {
   const startedAt = new Date();
   try {
-    const projects = await fetchFromQW('projects');
+    const { data: projects, retries } = await fetchFromQW('projects');
     for (const p of projects) {
       const isOpen = p.status === 'active';
       await db.query(
@@ -56,7 +86,7 @@ async function pullProjects() {
       [ABSENT_CLOSE_REASON]
     );
     const closedNote = closed.rows.length ? `; closed as no longer sent: ${closed.rows.map(r => r.qw_project_number).join(', ')}` : '';
-    await logSync('projects', 'success', `${projects.length} projects synced${closedNote}`, startedAt);
+    await logSync('projects', 'success', `${projects.length} projects synced${closedNote}${retryNote(retries)}`, startedAt);
   } catch (err) {
     await logSync('projects', 'error', err.message, startedAt);
     throw err;
@@ -115,7 +145,7 @@ function collapseRates(rows) {
 async function pullRates() {
   const startedAt = new Date();
   try {
-    const rows = await fetchFromQW('rates');
+    const { data: rows, retries } = await fetchFromQW('rates');
     const { codes, exceptions, unmapped } = collapseRates(rows);
     let upserted = 0;
     const clashes = [];
@@ -146,6 +176,7 @@ async function pullRates() {
     if (unmapped.length) detail += `; unmapped in QW category table (defaulted by prefix): ${unmapped.join(', ')}`;
     if (clashes.length) detail += `; skipped, clashes with a non-project code: ${clashes.join(', ')}`;
     if (retired.rows.length) detail += `; retired: ${retired.rows.map(r => r.code).join(', ')}`;
+    detail += retryNote(retries);
     await logSync('cost_codes', clashes.length ? 'partial' : 'success', detail, startedAt);
   } catch (err) {
     await logSync('cost_codes', 'error', err.message, startedAt);
