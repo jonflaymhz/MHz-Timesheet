@@ -300,4 +300,18 @@ router.post('/users/:qwUserId/reset-mfa', async (req, res) => {
   }
 });
 
+// Project pull on demand (Urgent Fixes Batch 1, item 9). QW calls this when a
+// project is kicked off, closed or reopened, so it's bookable (or not) at
+// once instead of at the next hourly pull, which stays as the fallback.
+// Runs the same pull, so the result is identical to an hourly one.
+const { pullProjects } = require('../services/qwPull');
+router.post('/projects/sync', async (req, res) => {
+  await pullProjects();
+  const { rows } = await db.query(
+    `SELECT qw_project_number, is_open, timesheet_enabled FROM project_ref WHERE qw_project_number = $1`,
+    [req.body && req.body.project_number ? String(req.body.project_number) : null]
+  );
+  res.json({ ok: true, project: rows[0] || null });
+});
+
 module.exports = router;
