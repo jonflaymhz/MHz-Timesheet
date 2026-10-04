@@ -72,6 +72,7 @@ function capabilityLabels(u) {
 }
 
 function UsersTab() {
+  const { user } = useAuth()
   const [users, setUsers] = useState([])
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('')
