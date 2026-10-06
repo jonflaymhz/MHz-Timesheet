@@ -27,3 +27,18 @@ export function weekdayName(dateStr) {
   const d = new Date(dateStr + 'T00:00:00Z')
   return WEEKDAYS[d.getUTCDay()]
 }
+
+// Today's calendar date in the UK as 'YYYY-MM-DD' (matches the backend's
+// londonToday): at 00:30 BST it's still yesterday in UTC.
+export function londonDate(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now)
+}
+
+// Monday ('YYYY-MM-DD') of the week containing `date`: a 'YYYY-MM-DD' string
+// as given, or a Date by its UK calendar date (Security Fixes v1.1, C1).
+export function mondayOf(date) {
+  const ymd = typeof date === 'string' ? date.slice(0, 10) : londonDate(date)
+  const d = new Date(ymd + 'T00:00:00Z')
+  d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7)
+  return d.toISOString().slice(0, 10)
+}

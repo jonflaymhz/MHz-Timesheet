@@ -15,9 +15,11 @@ function isoWeekNumber(date) {
   return 1 + Math.round((d - firstThursday) / (7 * 86400000));
 }
 
-// Monday of the week containing `date`.
+// Monday of the week containing `date`, by the UK calendar date: at 00:30
+// BST on a Monday it's still Sunday in UTC, which used to give the previous
+// week (Security Fixes & Bugs v1.1, C1). Returns a UTC-midnight Date.
 function mondayOf(date) {
-  const d = toDateOnly(date);
+  const d = new Date(londonToday(date) + 'T00:00:00Z');
   const dayNum = (d.getUTCDay() + 6) % 7; // Mon=0..Sun=6
   d.setUTCDate(d.getUTCDate() - dayNum);
   return d;

@@ -1,13 +1,8 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api.js'
+import { mondayOf } from '../lib/dates.js'
 
-function mondayOf(date) {
-  const d = new Date(date)
-  const day = (d.getUTCDay() + 6) % 7
-  d.setUTCDate(d.getUTCDate() - day)
-  return d.toISOString().slice(0, 10)
-}
 function lastCompletedWeekStart() {
   const m = new Date(mondayOf(new Date()))
   m.setUTCDate(m.getUTCDate() - 7)
