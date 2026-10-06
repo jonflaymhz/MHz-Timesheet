@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { api } from '../lib/api.js'
+import { api, getKioskToken } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 import { useAutofocusOnVisible } from '../hooks/useAutofocusOnVisible.js'
 import { groupForKiosk } from '../lib/kioskGroups.js'
@@ -15,9 +15,12 @@ import { groupForKiosk } from '../lib/kioskGroups.js'
 export default function LoginPage() {
   const { refresh } = useAuth()
   const navigate = useNavigate()
-  const [kioskMode, setKioskMode] = useState(false)
+  // A browser registered as a kiosk (Admin > Kiosk devices) opens on the tiles.
+  const isKioskDevice = !!getKioskToken()
+  const [kioskMode, setKioskMode] = useState(isKioskDevice)
   const [kioskUsers, setKioskUsers] = useState([])
-  const [selectedUsername, setSelectedUsername] = useState('')
+  const [kioskError, setKioskError] = useState('')
+  const [selectedUserId, setSelectedUserId] = useState('')
   const [selectedName, setSelectedName] = useState('')
 
   const [username, setUsername] = useState('')
@@ -33,7 +36,8 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (kioskMode) {
-      api.get('/auth/kiosk-users').then(setKioskUsers).catch(() => {})
+      setKioskError('')
+      api.get('/auth/kiosk-users').then(setKioskUsers).catch(e => { setKioskUsers([]); setKioskError(e.message) })
     }
   }, [kioskMode])
 
@@ -62,10 +66,9 @@ export default function LoginPage() {
     setError(''); setLoading(true)
     try {
       await api.post('/auth/login', {
-        username: kioskMode ? selectedUsername : username,
+        ...(kioskMode ? { user_id: selectedUserId } : { username }),
         pin,
         is_kiosk: kioskMode,
-        device_label: kioskMode ? 'Factory kiosk' : undefined,
       })
       await refresh()
       navigate('/')
@@ -77,7 +80,7 @@ export default function LoginPage() {
     }
   }
 
-  const showCredentialStepForFocus = kioskMode ? !!selectedUsername : tier !== null
+  const showCredentialStepForFocus = kioskMode ? !!selectedUserId : tier !== null
   useAutofocusOnVisible(usernameRef, !kioskMode && !showCredentialStepForFocus)
   useAutofocusOnVisible(pinRef, showCredentialStepForFocus && (kioskMode || tier === 'standard'))
   useAutofocusOnVisible(passwordRef, !kioskMode && showCredentialStepForFocus && tier === 'elevated')
@@ -96,17 +99,18 @@ export default function LoginPage() {
     }
   }
 
-  if (kioskMode && !selectedUsername) {
+  if (kioskMode && !selectedUserId) {
     return (
       <div className="page" style={{ paddingTop: 40 }}>
         <h1 style={{ textAlign: 'center', marginBottom: 6 }}>Who's this?</h1>
         <p style={{ textAlign: 'center', color: 'var(--text2)', marginBottom: 24 }}>Tap your name, then enter your PIN</p>
+        {kioskError && <div className="banner banner-error" style={{ maxWidth: 480, margin: '0 auto 16px' }}>{kioskError}</div>}
         <div className="kiosk-groups">
           {groupForKiosk(kioskUsers).map(({ group, people }) => (
             <div key={group} className="kiosk-group">
               <div className="kiosk-group-title">{group}</div>
               {people.map(u => (
-                <button key={u.id} className="name-tile" onClick={() => { setSelectedUsername(u.username); setSelectedName(u.full_name) }}>
+                <button key={u.id} className="name-tile" onClick={() => { setSelectedUserId(u.id); setSelectedName(u.full_name) }}>
                   <div className="name-tile-avatar">{(u.short_name || u.full_name).charAt(0)}</div>
                   {u.short_name || u.full_name}
                 </button>
@@ -123,16 +127,16 @@ export default function LoginPage() {
 
   // Kiosk mode always goes straight to the PIN step — tile selection already
   // identified a standard-tier account.
-  const showCredentialStep = kioskMode ? !!selectedUsername : tier !== null
+  const showCredentialStep = kioskMode ? !!selectedUserId : tier !== null
 
   return (
     <div className="page" style={{ paddingTop: 60, maxWidth: 380 }}>
       <h1 style={{ textAlign: 'center', marginBottom: 30 }}>MHz Timesheets</h1>
-      {kioskMode && selectedUsername && (
+      {kioskMode && selectedUserId && (
         <div style={{ textAlign: 'center', marginBottom: 20 }}>
           <div className="name-tile-avatar" style={{ margin: '0 auto 10px' }}>{selectedName.charAt(0)}</div>
           <div style={{ fontWeight: 700, fontSize: 17 }}>{selectedName}</div>
-          <button className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => setSelectedUsername('')}>Not you?</button>
+          <button className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => setSelectedUserId('')}>Not you?</button>
         </div>
       )}
 

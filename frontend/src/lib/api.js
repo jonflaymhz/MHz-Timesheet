@@ -3,11 +3,26 @@
 // credentials: 'include', no Authorization header to manage.
 const BASE = '/api'
 
+// Kiosk device token (Security Fixes v1.1 A3): set on a browser a System
+// admin registered as a kiosk, sent on every request; the server only acts
+// on it for the tile list and PIN login.
+const KIOSK_KEY = 'mhz_ts_kiosk_device'
+export function getKioskToken() {
+  try { return localStorage.getItem(KIOSK_KEY) } catch { return null }
+}
+export function setKioskToken(token) {
+  try { token ? localStorage.setItem(KIOSK_KEY, token) : localStorage.removeItem(KIOSK_KEY) } catch {}
+}
+
 async function request(method, path, body) {
+  const headers = {}
+  if (body) headers['Content-Type'] = 'application/json'
+  const kiosk = getKioskToken()
+  if (kiosk) headers['X-Kiosk-Device'] = kiosk
   const res = await fetch(`${BASE}${path}`, {
     method,
     credentials: 'include',
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   })
   const data = await res.json().catch(() => ({}))

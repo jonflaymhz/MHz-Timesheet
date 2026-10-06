@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { api } from '../lib/api.js'
+import { api, getKioskToken, setKioskToken } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 import { isSystemAdmin, isPayrollAdmin } from '../lib/capabilities.js'
 
@@ -8,6 +8,7 @@ const TABS = [
   { key: 'projects', label: 'Projects' },
   { key: 'costcodes', label: 'Cost codes' },
   { key: 'ctp', label: 'CTP builds' },
+  { key: 'kiosk', label: 'Kiosk devices' },
   { key: 'overrides', label: 'Overrides' },
   { key: 'audit', label: 'Audit log' },
   { key: 'outstanding', label: 'Outstanding' },
@@ -33,7 +34,7 @@ export default function AdminPage() {
   const isAdmin = isSystemAdmin(user)
   const isPayroll = isPayrollAdmin(user)
   const visibleTabs = TABS.filter(t => {
-    if (['users', 'costcodes', 'ctp'].includes(t.key)) return isAdmin
+    if (['users', 'costcodes', 'ctp', 'kiosk'].includes(t.key)) return isAdmin
     if (t.key === 'sendhours') return isPayroll
     return true
   })
@@ -50,6 +51,7 @@ export default function AdminPage() {
         {tab === 'projects' && <ProjectsTab />}
         {tab === 'costcodes' && isAdmin && <CostCodesTab />}
         {tab === 'ctp' && isAdmin && <CtpBuildsTab />}
+        {tab === 'kiosk' && isAdmin && <KioskDevicesTab />}
         {tab === 'overrides' && <OverridesTab />}
         {tab === 'audit' && <AuditTab />}
         {tab === 'outstanding' && <OutstandingTab />}
@@ -654,6 +656,78 @@ function OutstandingTab() {
 }
 
 // ── Integration health ────────────────────────────────────────
+// ── Kiosk devices (Security Fixes & Bugs v1.1, A3) ──────────
+// The tile list and PIN login only work on a browser registered here. The
+// token is created on the server, saved in this browser only, and stored
+// hashed; it's never shown.
+function KioskDevicesTab() {
+  const [rows, setRows] = useState([])
+  const [label, setLabel] = useState('Workshop kiosk')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [thisRegistered, setThisRegistered] = useState(!!getKioskToken())
+  function load() { api.get('/admin/kiosk-devices').then(setRows).catch(e => setError(e.message)) }
+  useEffect(load, [])
+
+  async function register() {
+    setError(''); setBusy(true)
+    try {
+      const d = await api.post('/admin/kiosk-devices', { label })
+      setKioskToken(d.token)
+      setThisRegistered(true)
+      load()
+    } catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
+  async function revoke(d) {
+    if (!window.confirm(`Revoke "${d.label}"? That browser will stop showing the kiosk and PIN sign-in.`)) return
+    setError('')
+    try {
+      await api.post(`/admin/kiosk-devices/${d.id}/revoke`)
+      if (d.is_this_device) { setKioskToken(null); setThisRegistered(false) }
+      load()
+    } catch (e) { setError(e.message) }
+  }
+  const thisDevice = rows.find(r => r.is_this_device && !r.revoked_at)
+
+  return (
+    <div>
+      <h2 style={{ fontSize: 17, marginBottom: 6 }}>Kiosk devices</h2>
+      <p style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 14 }}>
+        The name tiles and PIN sign-in only work on a browser registered here. Register the workshop kiosk from the kiosk itself:
+        sign in there as an admin, register it, then sign out. It opens on the name tiles from then on.
+      </p>
+      {error && <div className="banner banner-error">{error}</div>}
+      <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+        {thisDevice ? (
+          <div>This browser is registered as <strong>{thisDevice.label}</strong>.</div>
+        ) : (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span>{thisRegistered ? 'This browser has an old or revoked kiosk token.' : 'This browser is not a kiosk.'}</span>
+            <input className="input" style={{ width: 220 }} value={label} onChange={e => setLabel(e.target.value)} placeholder="Device name" />
+            <button className="btn btn-primary btn-sm" disabled={busy || !label.trim()} onClick={register}>Register this device as a kiosk</button>
+          </div>
+        )}
+      </div>
+      <div className="card">
+        {rows.length === 0 && <div style={{ padding: 16, color: 'var(--text3)' }}>No kiosk devices registered yet.</div>}
+        {rows.map(d => (
+          <div key={d.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid var(--border)', opacity: d.revoked_at ? 0.55 : 1 }}>
+            <div>
+              <div style={{ fontWeight: 600 }}>{d.label}{d.is_this_device ? ' (this browser)' : ''}</div>
+              <div style={{ fontSize: 12, color: 'var(--text3)' }}>
+                Registered {new Date(d.created_at).toLocaleString('en-GB')}{d.created_by_name ? ` by ${d.created_by_name}` : ''}
+                {' · '}Last used {d.last_seen_at ? new Date(d.last_seen_at).toLocaleString('en-GB') : 'never'}
+                {d.revoked_at ? ` · Revoked ${new Date(d.revoked_at).toLocaleString('en-GB')}` : ''}
+              </div>
+            </div>
+            {!d.revoked_at && <button className="btn btn-ghost btn-sm" onClick={() => revoke(d)}>Revoke</button>}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function HealthTab() {
   const [rows, setRows] = useState([])
   useEffect(() => { api.get('/admin/integration-health').then(setRows).catch(() => {}) }, [])

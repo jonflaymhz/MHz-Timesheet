@@ -24,11 +24,18 @@ const DEPT_CODES = ['CL', 'WW', 'EL', 'IL', 'PM'];
 const USERNAME_RE = /^[a-z0-9][a-z0-9.\-]*$/;
 const STATUSES = ['active', 'frozen', 'closing', 'removed'];
 
+// No fallback (Security Fixes & Bugs v1.1, A4): without the secret the
+// server refuses to start rather than running with an empty one.
+const QW_ADMIN_SHARED_SECRET = (process.env.QW_ADMIN_SHARED_SECRET || '').trim();
+if (!QW_ADMIN_SHARED_SECRET) {
+  throw new Error('QW_ADMIN_SHARED_SECRET is not set in backend/.env. It must match QW\'s TIMESHEET_ADMIN_SECRET. Refusing to start.');
+}
+
 function requireQwAdminSecret(req, res, next) {
-  const expected = process.env.QW_ADMIN_SHARED_SECRET || '';
-  const provided = req.headers['x-qw-admin-secret'] || '';
-  const a = Buffer.from(provided), b = Buffer.from(expected);
-  if (!expected || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+  const provided = String(req.headers['x-qw-admin-secret'] || '');
+  // Compare fixed-length digests so neither content nor length leaks through timing.
+  const digest = v => crypto.createHash('sha256').update(v).digest();
+  if (!crypto.timingSafeEqual(digest(provided), digest(QW_ADMIN_SHARED_SECRET))) {
     return res.status(401).json({ error: 'Unauthorised' });
   }
   next();

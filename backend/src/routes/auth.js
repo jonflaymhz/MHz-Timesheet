@@ -7,6 +7,7 @@ const db = require('../db/pool');
 const { verifyPin, isValidPin } = require('../services/pin');
 const { createSession, revokeSession, revokeAllSessionsForUser } = require('../services/session');
 const { requireAuth, COOKIE_NAME } = require('../middleware/auth');
+const { requireKioskDevice } = require('../services/kioskDevice');
 
 const router = express.Router();
 
@@ -29,9 +30,11 @@ function setSessionCookie(req, res, token, expiresAt) {
 // itself. A PIN is always required next (confirmed policy). Elevated-tier
 // accounts (Section 3.1) are excluded even if they hold a pin_hash — a
 // shared kiosk has no password/TOTP fields to fall back to.
-router.get('/kiosk-users', async (req, res) => {
+// Registered kiosk devices only (Security Fixes v1.1 A3), and no usernames:
+// a tile logs in by user id.
+router.get('/kiosk-users', requireKioskDevice, async (req, res) => {
   const result = await db.query(
-    `SELECT id, full_name, short_name, kiosk_group, username FROM users
+    `SELECT id, full_name, short_name, kiosk_group FROM users
       WHERE is_active = TRUE AND pin_hash IS NOT NULL AND pin_locked_at IS NULL
         AND NOT can_approve AND NOT is_payroll_admin AND NOT is_system_admin
       ORDER BY short_name`
@@ -67,16 +70,21 @@ router.post('/login-tier', async (req, res) => {
 // ── POST /api/auth/login ──────────────────────────────────────
 // Standard tier: username + 6-digit PIN. Works identically whether it's a
 // personal device or (with is_kiosk) the shared terminal after a tile tap —
-// the PIN check is exactly the same either way.
-router.post('/login', async (req, res) => {
-  const { username, pin, device_label, is_kiosk } = req.body;
-  if (!username || !isValidPin(pin)) {
+// the PIN check is exactly the same either way. Only from a registered
+// device (Security Fixes v1.1 A3), so nobody elsewhere can guess PINs and
+// lock people out. A kiosk tile sends user_id; a typed login sends username.
+router.post('/login', requireKioskDevice, async (req, res) => {
+  const { username, user_id, pin, is_kiosk } = req.body;
+  if ((!username && !user_id) || !isValidPin(pin)) {
     return res.status(400).json({ error: 'Username and a 6-digit PIN are required' });
   }
-  const userResult = await db.query(
-    `SELECT * FROM users WHERE username = $1 AND is_active = TRUE`,
-    [username.trim().toLowerCase()]
-  );
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (user_id && !UUID_RE.test(String(user_id))) {
+    return res.status(401).json({ error: 'Invalid username or PIN' });
+  }
+  const userResult = user_id
+    ? await db.query(`SELECT * FROM users WHERE id = $1 AND is_active = TRUE`, [user_id])
+    : await db.query(`SELECT * FROM users WHERE username = $1 AND is_active = TRUE`, [String(username).trim().toLowerCase()]);
   const user = userResult.rows[0];
   if (!user || !user.pin_hash) {
     return res.status(401).json({ error: 'Invalid username or PIN' });
@@ -99,7 +107,7 @@ router.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'Invalid username or PIN', attempts_remaining: result.attemptsRemaining });
   }
   const { token, expiresAt } = await createSession(user.id, {
-    deviceLabel: device_label || null,
+    deviceLabel: req.kioskDevice.label,
     isKiosk: !!is_kiosk,
   });
   await db.query(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [user.id]);

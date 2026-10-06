@@ -29,6 +29,48 @@ function userStatus(row) {
   return 'active';
 }
 
+// ── Kiosk devices (Security Fixes & Bugs v1.1, A3) — System admin only ───
+// Registering returns the token once; only its hash is kept. The browser that
+// asked stores it and becomes a kiosk (tile list + PIN login).
+const { hashToken, newToken } = require('../services/kioskDevice');
+
+router.get('/kiosk-devices', requireAuth, requireSystemAdmin, async (req, res) => {
+  const mine = req.get('x-kiosk-device');
+  const { rows } = await db.query(
+    `SELECT d.id, d.label, d.created_at, d.last_seen_at, d.revoked_at, u.full_name AS created_by_name,
+            (d.token_hash = $1) AS is_this_device
+       FROM kiosk_devices d LEFT JOIN users u ON u.id = d.created_by
+      ORDER BY d.revoked_at IS NOT NULL, d.created_at DESC`, [mine ? hashToken(mine) : '']);
+  res.json(rows);
+});
+
+router.post('/kiosk-devices', requireAuth, requireSystemAdmin, async (req, res) => {
+  const label = (req.body.label || '').toString().trim().slice(0, 80);
+  if (!label) return res.status(400).json({ error: 'Give the device a name, e.g. "Workshop kiosk"' });
+  const token = newToken();
+  const { rows } = await db.query(
+    `INSERT INTO kiosk_devices (label, token_hash, created_by) VALUES ($1, $2, $3) RETURNING id, label, created_at`,
+    [label, hashToken(token), req.user.id]);
+  await db.query(
+    `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by, new_value)
+     VALUES ('register_kiosk_device', 'kiosk_device', $1, $2, $3)`,
+    [rows[0].id, req.user.id, JSON.stringify({ label })]);
+  res.json({ ...rows[0], token });
+});
+
+router.post('/kiosk-devices/:id/revoke', requireAuth, requireSystemAdmin, async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) return res.status(404).json({ error: 'Device not found' });
+  const { rows } = await db.query(
+    `UPDATE kiosk_devices SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL RETURNING id, label`,
+    [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Device not found or already revoked' });
+  await db.query(
+    `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by, old_value)
+     VALUES ('revoke_kiosk_device', 'kiosk_device', $1, $2, $3)`,
+    [rows[0].id, req.user.id, JSON.stringify({ label: rows[0].label })]);
+  res.json({ ok: true });
+});
+
 // ── User management (admin scope Section 3) — System admin only ───
 router.get('/users', requireAuth, requireSystemAdmin, async (req, res) => {
   const params = [];
