@@ -26,14 +26,14 @@ async function fetchFromQW(path) {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
       if (res.ok) return { data: await res.json(), retries };
-      if (res.status < 500) throw Object.assign(new Error(`QW responded ${res.status} for ${path}`), { final: true });
+      if (res.status < 500) throw Object.assign(new Error(`Genlock responded ${res.status} for ${path}`), { final: true });
       failure = String(res.status);
     } catch (err) {
       if (err.final) throw err;
       failure = err.name === 'TimeoutError' ? 'timeout' : `connection error (${err.cause?.code || err.message})`;
     }
     if (attempt >= RETRY_DELAYS_MS.length) {
-      throw new Error(`QW responded ${failure} for ${path}${retries.length ? ` after ${retries.length} retries (${retries.join(', ')})` : ''}`);
+      throw new Error(`Genlock responded ${failure} for ${path}${retries.length ? ` after ${retries.length} retries (${retries.join(', ')})` : ''}`);
     }
     retries.push(failure);
     console.warn(`QW pull ${path}: ${failure}, retry ${attempt + 1} of ${RETRY_DELAYS_MS.length} in ${RETRY_DELAYS_MS[attempt] / 1000}s`);
@@ -56,7 +56,7 @@ async function logSync(type, status, detail, startedAt) {
 // project_name picks up the title with no further change. A project QW
 // sends as active arrives with Timesheet on (§2.11); an existing row keeps
 // its own timesheet_enabled setting.
-const ABSENT_CLOSE_REASON = 'No longer sent by QW';
+const ABSENT_CLOSE_REASON = 'No longer sent by Genlock';
 
 async function pullProjects() {
   const startedAt = new Date();
@@ -72,7 +72,7 @@ async function pullProjects() {
          DO UPDATE SET project_name = $2, project_title = $3, customer_name = $4, estimate_codes = $5,
                        qw_status = $6, is_open = $7, closed_reason = $8, last_synced_at = NOW()`,
         [p.project_number, p.project_name, p.title || null, p.customer || null, p.estimate_codes || [],
-         p.status, isOpen, isOpen ? null : 'Closed in QW']
+         p.status, isOpen, isOpen ? null : 'Closed in Genlock']
       );
     }
     // §2.13: a project QW stops sending (deleted, or renumbered — SY5708 and
@@ -171,9 +171,9 @@ async function pullRates() {
         RETURNING code`,
       [codes.map(c => c.code)]
     );
-    let detail = `${upserted} of ${codes.length} QW base codes synced as project cost codes (from ${rows.length} catalogue items)`;
+    let detail = `${upserted} of ${codes.length} Genlock base codes synced as project cost codes (from ${rows.length} catalogue items)`;
     if (exceptions.length) detail += `; rate exceptions: ${exceptions.join('; ')}`;
-    if (unmapped.length) detail += `; unmapped in QW category table (defaulted by prefix): ${unmapped.join(', ')}`;
+    if (unmapped.length) detail += `; unmapped in Genlock category table (defaulted by prefix): ${unmapped.join(', ')}`;
     if (clashes.length) detail += `; skipped, clashes with a non-project code: ${clashes.join(', ')}`;
     if (retired.rows.length) detail += `; retired: ${retired.rows.map(r => r.code).join(', ')}`;
     detail += retryNote(retries);

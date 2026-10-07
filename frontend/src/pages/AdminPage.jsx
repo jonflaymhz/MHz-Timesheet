@@ -123,8 +123,8 @@ function UsersTab() {
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 14 }}>
         <h2 style={{ fontSize: 17 }}>Users</h2>
         <div style={{ display: 'flex', gap: 8 }}>
-          <a className="btn btn-ghost btn-sm" href={`${QW_ADMIN_URL}?view=inactive`} target="_blank" rel="noreferrer">Inactive users (QW)</a>
-          <a className="btn btn-primary btn-sm" href={`${QW_ADMIN_URL}?new=1`} target="_blank" rel="noreferrer">+ New user (in QW)</a>
+          <a className="btn btn-ghost btn-sm" href={`${QW_ADMIN_URL}?view=inactive`} target="_blank" rel="noreferrer">Inactive users (Genlock)</a>
+          <a className="btn btn-primary btn-sm" href={`${QW_ADMIN_URL}?new=1`} target="_blank" rel="noreferrer">+ New user (in Genlock)</a>
         </div>
       </div>
       {error && <div className="banner banner-error">{error}</div>}
@@ -168,8 +168,8 @@ function UsersTab() {
               </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 340 }}>
                 {u.qw_user_id
-                  ? <a className="btn btn-ghost btn-sm" href={`${QW_ADMIN_URL}?user=${u.qw_user_id}`} target="_blank" rel="noreferrer">Edit in QW</a>
-                  : <span style={{ fontSize: 12, color: 'var(--text3)', alignSelf: 'center' }}>No QW user</span>}
+                  ? <a className="btn btn-ghost btn-sm" href={`${QW_ADMIN_URL}?user=${u.qw_user_id}`} target="_blank" rel="noreferrer">Edit in Genlock</a>
+                  : <span style={{ fontSize: 12, color: 'var(--text3)', alignSelf: 'center' }}>No Genlock user</span>}
                 {u.pin_locked_at && <button className="btn btn-danger btn-sm" onClick={() => unlock(u.id)}>Unlock PIN</button>}
                 {u.does_timesheets && <button className="btn btn-ghost btn-sm" onClick={() => resetPin(u)}>Reset PIN</button>}
                 {(u.can_approve || u.is_payroll_admin || u.is_system_admin) && <button className="btn btn-ghost btn-sm" onClick={() => resetPassword(u)}>Reset password</button>}
@@ -238,7 +238,7 @@ function ProjectsTab() {
             <div>
               <div style={{ fontWeight: 600 }}>{p.project_name}</div>
               <div style={{ fontSize: 12, color: 'var(--text3)' }}>
-                QW status: {p.qw_status} · synced {new Date(p.last_synced_at).toLocaleString('en-GB')}
+                Genlock status: {p.qw_status} · synced {new Date(p.last_synced_at).toLocaleString('en-GB')}
                 {p.closed_reason && !p.effective_open && <span style={{ color: 'var(--status-bad-text)' }}> · {p.closed_reason}</span>}
               </div>
             </div>
@@ -423,7 +423,7 @@ function CostCodesTab() {
             <div>
               <div style={{ fontWeight: 600 }}>{c.code} <span style={{ fontWeight: 400, color: 'var(--text3)' }}>— {c.description}</span></div>
               <div style={{ fontSize: 12, color: 'var(--text3)' }}>
-                {c.code_type === 'project' ? 'Project code, from QW catalogue' : 'Non-project code'} · Department: {c.department}{!c.is_active ? ' · inactive' : ''}
+                {c.code_type === 'project' ? 'Project code, from Genlock catalogue' : 'Non-project code'} · Department: {c.department}{!c.is_active ? ' · inactive' : ''}
               </div>
             </div>
             {c.code_type === 'project' ? (
@@ -775,7 +775,7 @@ function SendHoursTab() {
   const totalEntries = (preview?.qw.total_entries || 0) + (preview?.ctp.total_entries || 0)
 
   async function send() {
-    if (!window.confirm(`Send ${totalHours} hours (${preview.qw.total_hours}h to QW, ${preview.ctp.total_hours}h to CTP)?`)) return
+    if (!window.confirm(`Send ${totalHours} hours (${preview.qw.total_hours}h to Genlock, ${preview.ctp.total_hours}h to CTP)?`)) return
     setSending(true); setError('')
     try {
       const r = await api.post('/admin/send-hours/commit')
@@ -794,7 +794,7 @@ function SendHoursTab() {
     <div>
       <h2 style={{ fontSize: 17, marginBottom: 6 }}>Send approved hours</h2>
       <p style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 16 }}>
-        Approved hours not yet sent — project time goes to QW, build-linked CTP time goes to CTP. Non-project time and non-build CTP time never cross — they stay in Timesheet only.
+        Approved hours not yet sent — project time goes to Genlock, build-linked CTP time goes to CTP. Non-project time and non-build CTP time never cross — they stay in Timesheet only.
       </p>
       {error && <div className="banner banner-error">{error}</div>}
 
@@ -806,7 +806,7 @@ function SendHoursTab() {
           </div>
           {result.qw && (
             <SendResultBlock
-              label="QW"
+              label="Genlock"
               counts={[
                 `${result.qw.inserted ?? result.qw.succeeded} sent`,
                 `${result.qw.already_present ?? 0} already present`,
@@ -839,13 +839,13 @@ function SendHoursTab() {
         <>
           {preview.qw.unmapped_people.length > 0 && (
             <div className="banner banner-warn" style={{ marginBottom: 16 }}>
-              No QW account mapping for: {preview.qw.unmapped_people.join(', ')} — their hours will be reported as failed until this is fixed.
+              No Genlock account mapping for: {preview.qw.unmapped_people.join(', ')} — their hours will be reported as failed until this is fixed.
             </div>
           )}
 
           {preview.qw.total_entries > 0 && (
             <>
-              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>To QW — by project</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>To Genlock — by project</div>
               <div className="card" style={{ marginBottom: 16 }}>
                 {preview.qw.by_project.map(p => (
                   <div key={p.qw_project_number} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>

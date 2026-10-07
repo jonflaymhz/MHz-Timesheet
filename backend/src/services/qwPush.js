@@ -57,7 +57,7 @@ async function sendBatch(entries, initiatedByUserId) {
       });
       if (!res.ok) {
         const body = await res.text();
-        throw new Error(`QW responded ${res.status}: ${body}`);
+        throw new Error(`Genlock responded ${res.status}: ${body}`);
       }
       const body = await res.json();
       qwResults = body.results || [];
@@ -84,7 +84,7 @@ async function sendBatch(entries, initiatedByUserId) {
       failures.push({
         entry_id: e.id, entry_date: e.entry_date, hours: e.hours,
         project: e.qw_project_number, project_name: e.project_name, person: e.person_name,
-        reason: r?.message || 'No response from QW for this entry',
+        reason: r?.message || 'No response from Genlock for this entry',
       });
     }
   }
@@ -92,7 +92,7 @@ async function sendBatch(entries, initiatedByUserId) {
     failures.push({
       entry_id: e.id, entry_date: e.entry_date, hours: e.hours,
       project: e.qw_project_number, project_name: e.project_name, person: e.person_name,
-      reason: 'No QW account mapping for this person',
+      reason: 'No Genlock account mapping for this person',
     });
   }
 

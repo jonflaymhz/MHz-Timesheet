@@ -508,7 +508,7 @@ router.patch('/cost-codes/:id', requireAuth, requireSystemAdmin, async (req, res
   // (Working Cost Codes v1.1 §2.1); a local edit would just be overwritten.
   const existing = (await db.query(`SELECT code_type FROM cost_code WHERE id = $1`, [req.params.id])).rows[0];
   if (existing?.code_type === 'project' && current_rate !== undefined) {
-    return res.status(400).json({ error: 'Project code rates come from the QW labour catalogue; change them there' });
+    return res.status(400).json({ error: 'Project code rates come from the Genlock labour catalogue; change them there' });
   }
   const result = await db.query(
     `UPDATE cost_code SET current_rate = COALESCE($2, current_rate), is_active = COALESCE($3, is_active)

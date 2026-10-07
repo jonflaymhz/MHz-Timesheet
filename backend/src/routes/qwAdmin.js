@@ -76,7 +76,7 @@ async function audit(client, action, entityId, performedBy, oldValue, newValue, 
     `INSERT INTO audit_log (action_type, entity_type, entity_id, performed_by, old_value, new_value, reason)
      VALUES ($1, 'user', $2, $3, $4, $5, $6)`,
     [action, entityId, performedBy, oldValue ? JSON.stringify(oldValue) : null, newValue ? JSON.stringify(newValue) : null,
-      reason || 'via QW Admin > Users']
+      reason || 'via Genlock Admin > Users']
   );
 }
 
@@ -89,7 +89,7 @@ router.get('/users', async (req, res) => {
 
 router.get('/users/:qwUserId', async (req, res) => {
   const r = await db.query(`${USER_SELECT} WHERE u.qw_user_id = $1`, [parseInt(req.params.qwUserId, 10)]);
-  if (!r.rows[0]) return res.status(404).json({ error: 'No Timesheet user for this QW user', not_linked: true });
+  if (!r.rows[0]) return res.status(404).json({ error: 'No Timesheet user for this Genlock user', not_linked: true });
   res.json(shape(r.rows[0]));
 });
 
@@ -97,7 +97,7 @@ router.get('/users/:qwUserId', async (req, res) => {
 // active direct reports, and their submitted weeks waiting on approval.
 router.get('/users/:qwUserId/close-out-info', async (req, res) => {
   const u = (await db.query(`SELECT id FROM users WHERE qw_user_id = $1`, [parseInt(req.params.qwUserId, 10)])).rows[0];
-  if (!u) return res.status(404).json({ error: 'No Timesheet user for this QW user', not_linked: true });
+  if (!u) return res.status(404).json({ error: 'No Timesheet user for this Genlock user', not_linked: true });
   const reports = (await db.query(
     `SELECT r.id, r.full_name, r.qw_user_id FROM users r WHERE r.reports_to = $1 AND r.removed_at IS NULL ORDER BY r.full_name`, [u.id])).rows;
   const awaiting = (await db.query(
@@ -144,7 +144,7 @@ router.put('/users/:qwUserId', async (req, res) => {
     const before = (await client.query(`SELECT * FROM users WHERE qw_user_id = $1 FOR UPDATE`, [qwUserId])).rows[0];
     if (!before && !t) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'No Timesheet user for this QW user', not_linked: true });
+      return res.status(404).json({ error: 'No Timesheet user for this Genlock user', not_linked: true });
     }
     const performedBy = await actorId(client, b.actor_qw_user_id);
 
@@ -288,7 +288,7 @@ router.post('/users/:qwUserId/reset-mfa', async (req, res) => {
     return res.status(403).json({ error: 'An admin cannot reset their own MFA. Ask another admin.' });
   }
   const row = (await db.query(`SELECT id, full_name, mfa_enabled, mfa_secret FROM users WHERE qw_user_id = $1`, [req.params.qwUserId])).rows[0];
-  if (!row) return res.status(404).json({ error: 'No Timesheet user for this QW user', not_linked: true });
+  if (!row) return res.status(404).json({ error: 'No Timesheet user for this Genlock user', not_linked: true });
   if (!row.mfa_enabled && !row.mfa_secret) return res.json({ status: 'nothing_to_reset', full_name: row.full_name });
   const client = await db.getClient();
   try {
