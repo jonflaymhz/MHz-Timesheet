@@ -1,20 +1,22 @@
-import { useState, useEffect, useCallback } from 'react'
-import { useSearchParams, useNavigate, Link } from 'react-router-dom'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
+import { useIsDesktop } from '../hooks/useIsDesktop.js'
 import DayCard from '../components/DayCard.jsx'
-import { fmtRange, dayOfMonth, weekdayName } from '../lib/dates.js'
+import AddTimeSheet from '../components/AddTimeSheet.jsx'
+import AbsenceSheet from '../components/AbsenceSheet.jsx'
+import Sheet from '../components/Sheet.jsx'
+import DesktopWeek from '../components/DesktopWeek.jsx'
+import ReviewPanel from '../components/ReviewPanel.jsx'
+import { WeekSwitch, StatusChip, StatusMessages, lockedFootNote } from '../components/WeekBits.jsx'
+import { weekdayName } from '../lib/dates.js'
 import { canApprove } from '../lib/capabilities.js'
-
-function addDays(dateStr, n) {
-  const d = new Date(dateStr + 'T00:00:00Z')
-  d.setUTCDate(d.getUTCDate() + n)
-  return d.toISOString().slice(0, 10)
-}
+import { fmtH, weekDayStates, submitBlocker, dotColours, firstName } from '../lib/week.js'
 
 export default function WeekPage() {
   const { user } = useAuth()
-  const navigate = useNavigate()
+  const desktop = useIsDesktop()
   const [searchParams, setSearchParams] = useSearchParams()
   const forUserId = searchParams.get('for')
   const weekStartParam = searchParams.get('week_start')
@@ -24,16 +26,15 @@ export default function WeekPage() {
   const [approval, setApproval] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [missing, setMissing] = useState(null)
   const [submitting, setSubmitting] = useState(false)
-  const [rejectReason, setRejectReason] = useState('')
-  const [showReject, setShowReject] = useState(false)
-  const [reviewing, setReviewing] = useState(false)
-  const [confirmSubmit, setConfirmSubmit] = useState(false)
-  const [confirmApprove, setConfirmApprove] = useState(false)
+  const [openDays, setOpenDays] = useState(new Set())
+  const [addSheet, setAddSheet] = useState(null)      // { date, entry? }
+  const [absenceSheet, setAbsenceSheet] = useState(null) // { date, shortBy }
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [confirmChecked, setConfirmChecked] = useState(false)
 
-  const load = useCallback(async () => {
-    setLoading(true); setError(''); setMissing(null); setConfirmSubmit(false); setConfirmApprove(false)
+  const load = useCallback(async ({ quiet } = {}) => {
+    if (!quiet) setLoading(true)
     try {
       const path = forUserId
         ? `/weeks/for/${forUserId}${weekStartParam ? `?week_start=${weekStartParam}` : ''}`
@@ -42,6 +43,7 @@ export default function WeekPage() {
       setWeek(data.week)
       setEntries(data.entries)
       setApproval(data.approval || null)
+      if (!quiet) setError('')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -50,6 +52,20 @@ export default function WeekPage() {
   }, [forUserId, weekStartParam])
 
   useEffect(() => { load() }, [load])
+  const refresh = useCallback(() => load({ quiet: true }), [load])
+
+  const editable = !!week && (week.status === 'draft' || week.status === 'rejected')
+  const states = useMemo(() => (week ? weekDayStates(week, entries) : []), [week, entries])
+  const colours = useMemo(() => dotColours(entries), [entries])
+
+  // Smart default: days needing attention start open, complete days closed.
+  // Only when a different week (or status) loads, not after every edit.
+  useEffect(() => {
+    if (!week) return
+    const ed = week.status === 'draft' || week.status === 'rejected'
+    setOpenDays(new Set(ed ? weekDayStates(week, entries).filter(s => s.state === 'missing' || s.state === 'short').map(s => s.date) : []))
+    setConfirmChecked(false)
+  }, [week?.id, week?.status]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function goToWeek(startDate) {
     const next = new URLSearchParams(searchParams)
@@ -57,158 +73,162 @@ export default function WeekPage() {
     setSearchParams(next)
   }
 
+  function toggleDay(date) {
+    setOpenDays(prev => {
+      const n = new Set(prev)
+      if (n.has(date)) n.delete(date); else n.add(date)
+      return n
+    })
+  }
+
+  function jumpToDay(date) {
+    setOpenDays(prev => new Set(prev).add(date))
+    requestAnimationFrame(() => document.getElementById(`day-${date}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+  }
+
+  async function removeMarker(marker) {
+    setError('')
+    try {
+      await api.delete(`/weeks/${week.id}/entries/${marker.id}`)
+      refresh()
+    } catch (err) { setError(err.message) }
+  }
+
   async function submit() {
-    setSubmitting(true); setError(''); setMissing(null)
+    setSubmitting(true); setError('')
     try {
       await api.post(`/weeks/${week.id}/submit`, { confirmed: true })
-      load()
+      setConfirmOpen(false)
+      await load()
+      window.scrollTo({ top: 0 })
     } catch (err) {
-      if (err.body?.missing_dates) setMissing(err.body.missing_dates)
-      setError(err.message)
+      const missing = err.body?.missing_dates
+      setError(missing ? `Week is incomplete: ${missing.map(d => weekdayName(d)).join(', ')} still need hours or a reason.` : err.message)
+      setConfirmOpen(false)
     } finally {
       setSubmitting(false)
     }
   }
 
-  async function approve() {
-    setReviewing(true); setError('')
-    try {
-      await api.post(`/weeks/${week.id}/approve`, { confirmed: true })
-      load()
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setReviewing(false)
-    }
-  }
-
-  async function reject() {
-    if (!rejectReason.trim()) return
-    setReviewing(true); setError('')
-    try {
-      await api.post(`/weeks/${week.id}/reject`, { reason: rejectReason.trim() })
-      setShowReject(false); setRejectReason('')
-      load()
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setReviewing(false)
-    }
-  }
-
-  if (loading) return <div className="page" style={{ color: 'var(--text3)' }}>Loading…</div>
+  if (loading && !week) return <div className="page" style={{ color: 'var(--muted)' }}>Loading…</div>
   if (error && !week) return <div className="page"><div className="banner banner-error">{error}</div></div>
   if (!week) return null
 
-  const editable = week.status === 'draft' || week.status === 'rejected'
-  const weekTotal = entries.reduce((s, e) => s + Number(e.hours), 0)
-  const isProxyView = forUserId && forUserId !== user?.id
-  // The server decides who may approve (Working Cost Codes v1.1 §2.9/§2.10):
-  // the resolved approver, or an admin as fallback, and never someone who
-  // entered hours on the week. Anyone with approval access sees why not.
-  // Self-Approval v1.0: someone allowed to approve their own week reviews it
-  // here too (the server says so with path 'self').
+  const total = entries.reduce((s, e) => s + Number(e.hours), 0)
+  const isProxyView = !!forUserId && forUserId !== user?.id
+  const approverName = approval?.approver_name || (isProxyView ? 'the approver' : 'your supervisor')
+  const blocker = editable ? submitBlocker(week, states) : null
+  const resubmit = week.status === 'rejected'
+  const confirmText = isProxyView ? `I confirm these hours are accurate for ${week.owner_full_name}.` : 'I confirm these hours are accurate.'
+  const goesTo = resubmit ? `Goes back to ${approverName} for approval` : `Goes to ${approverName} for approval`
+
+  // Review (supervisor on a report's week, or self-approval), as before.
   const isSelfReview = !isProxyView && week.status === 'submitted' && approval?.allowed && approval.path === 'self'
   const canReview = (isProxyView && week.status === 'submitted' && canApprove(user) && !!approval) || isSelfReview
-  const approveBlocked = canReview && !approval.allowed
+
+  const dayTotalOf = (date) => states.find(s => s.date === date)?.total || 0
+  const sheets = (
+    <>
+      {addSheet && (
+        <AddTimeSheet week={week} date={addSheet.date} entry={addSheet.entry} dayTotal={dayTotalOf(addSheet.date)}
+          onClose={() => setAddSheet(null)} onSaved={refresh} />
+      )}
+      {absenceSheet && (
+        <AbsenceSheet week={week} date={absenceSheet.date} shortBy={absenceSheet.shortBy} dayTotal={dayTotalOf(absenceSheet.date)}
+          onClose={() => setAbsenceSheet(null)} onSaved={refresh} />
+      )}
+    </>
+  )
+
+  const proxyBanner = isProxyView && (
+    <div className="banner banner-warn">
+      {editable ? `Entering on behalf of ${week.owner_full_name}. This week will show as proxy-entered.` : `${week.owner_full_name}'s week.`}
+    </div>
+  )
+  const review = canReview && <ReviewPanel key={week.id} week={week} approval={approval} isSelfReview={isSelfReview} onDone={load} />
+
+  if (desktop) {
+    return (
+      <div className="page-wide">
+        {proxyBanner}
+        <DesktopWeek
+          week={week} entries={entries} states={states} colours={colours} total={total} editable={editable}
+          onGo={goToWeek} onRefresh={refresh} onAbsence={(date, shortBy) => setAbsenceSheet({ date, shortBy })}
+          onRemoveMarker={removeMarker} error={error} setError={setError}
+          blocker={blocker} submitting={submitting} onSubmit={submit} resubmit={resubmit}
+          confirmText={confirmText} goesTo={goesTo} approverName={approverName}
+          review={review}
+        />
+        {sheets}
+      </div>
+    )
+  }
 
   return (
-    <div className="page">
-      {isProxyView && (
-        <div className="banner banner-warn">Entering on behalf of a teammate — this week will show as proxy-entered.</div>
-      )}
+    <div className={`page${editable ? ' has-submit-bar' : ''}`}>
+      {proxyBanner}
+      <WeekSwitch week={week} onGo={goToWeek} />
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <button className="btn btn-ghost btn-sm" onClick={() => goToWeek(addDays(week.week_start_date, -7))}>← Prev</button>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontWeight: 700, fontSize: 16 }}>Week {week.week_number}</div>
-          <div style={{ fontSize: 13, color: 'var(--text2)' }}>{fmtRange(week.week_start_date, week.week_end_date)}</div>
+      <section className="summary" aria-label="Week summary">
+        <div className="summary-top">
+          <div>
+            <div className="summary-label">{isProxyView ? `${firstName(week.owner_full_name)}'s total` : 'Total this week'}</div>
+            <div className="summary-total">{fmtH(total)}<small>h</small></div>
+          </div>
+          <StatusChip status={week.status} />
         </div>
-        <button className="btn btn-ghost btn-sm" onClick={() => goToWeek(addDays(week.week_start_date, 7))}>Next →</button>
-      </div>
+        <div className="strip" role="group" aria-label="Days">
+          {states.map(s => (
+            <button key={s.date} type="button" onClick={() => jumpToDay(s.date)}
+              aria-label={`${weekdayName(s.date)}: ${fmtH(s.total)} hours, ${s.note}`}>
+              <span aria-hidden="true">{weekdayName(s.date)[0]}</span>
+              <span className={`strip-bar ${s.state === 'complete' || s.state === 'off' ? 'complete' : s.state === 'short' ? 'short' : ''}`} />
+            </button>
+          ))}
+        </div>
+      </section>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <span className={`tag tag-${week.status}`}>{week.status}</span>
-        <span style={{ fontWeight: 700, fontSize: 16 }}>{weekTotal} hrs total</span>
-      </div>
+      <StatusMessages week={week} approverName={approverName} />
+      {error && <div className="banner banner-error" role="alert">{error}</div>}
 
-      {week.status === 'rejected' && week.rejection_reason && (
-        <div className="banner banner-warn">Sent back: {week.rejection_reason}</div>
-      )}
-      {error && <div className="banner banner-error">{error}{missing && <div style={{ marginTop: 6 }}>Missing: {missing.join(', ')}</div>}</div>}
+      {states.map(s => (
+        <DayCard
+          key={s.date} day={s} open={openDays.has(s.date)} onToggle={() => toggleDay(s.date)}
+          editable={editable} colours={colours} weekOwnerId={week.user_id}
+          onAdd={() => setAddSheet({ date: s.date })}
+          onEdit={(entry) => setAddSheet({ date: s.date, entry })}
+          onAbsence={(shortBy) => setAbsenceSheet({ date: s.date, shortBy })}
+          onRemoveMarker={removeMarker}
+        />
+      ))}
 
-      {Array.from({ length: 7 }, (_, i) => {
-        const date = addDays(week.week_start_date, i)
-        return (
-          <DayCard
-            key={date}
-            date={date}
-            label={`${weekdayName(date)} ${dayOfMonth(date)}`}
-            entries={entries.filter(e => e.entry_date === date)}
-            weekId={week.id}
-            department={week.owner_department}
-            deptCode={week.owner_dept_code}
-            hasCtpAccess={week.owner_has_ctp_access}
-            editable={editable}
-            weekOwnerId={week.user_id}
-            onRefresh={load}
-          />
-        )
-      })}
+      {lockedFootNote(week, approverName) && <p className="foot-note">{lockedFootNote(week, approverName)}</p>}
+      {review}
 
       {editable && (
-        <>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 16, fontSize: 13, color: 'var(--text2)' }}>
-            <input type="checkbox" checked={confirmSubmit} onChange={e => setConfirmSubmit(e.target.checked)} />
-            {isProxyView
-              ? `I confirm these hours are accurate for ${week.owner_full_name}.`
-              : 'I confirm these hours are accurate.'}
-          </label>
-          <button className="btn btn-primary" style={{ width: '100%', marginTop: 8 }} onClick={submit} disabled={submitting || !confirmSubmit}>
-            {submitting ? 'Submitting…' : 'Submit week for approval'}
-          </button>
-        </>
-      )}
-
-      {canReview && !showReject && (
-        <>
-          {approveBlocked ? (
-            <div className="banner banner-warn" style={{ marginTop: 16 }}>{approval.reason}</div>
-          ) : (
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 16, fontSize: 13, color: 'var(--text2)' }}>
-              <input type="checkbox" checked={confirmApprove} onChange={e => setConfirmApprove(e.target.checked)} />
-              I've reviewed and confirm these hours as real.
-            </label>
-          )}
-          {isSelfReview && (
-            <div className="banner banner-info" style={{ marginTop: 16, marginBottom: 0 }}>
-              This is your own timesheet. You're allowed to approve it yourself; it's recorded as a self-approval and Payroll can see it.
-            </div>
-          )}
-          {approval.allowed && approval.path === 'admin' && (
-            <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 4 }}>
-              Approving as admin{approval.approver_name ? ` (normally ${approval.approver_name})` : ''}. The audit log records it as an admin approval.
-            </div>
-          )}
-          <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
-            <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => setShowReject(true)} disabled={reviewing || approveBlocked}>Reject</button>
-            <button className="btn btn-primary" style={{ flex: 1 }} onClick={approve} disabled={reviewing || approveBlocked || !confirmApprove}>Approve week</button>
-          </div>
-        </>
-      )}
-      {canReview && showReject && (
-        <div className="card" style={{ padding: 16, marginTop: 8 }}>
-          <textarea className="input" placeholder="Reason for sending this back…" value={rejectReason} onChange={e => setRejectReason(e.target.value)} style={{ marginBottom: 10, minHeight: 60 }} />
-          <div style={{ display: 'flex', gap: 10 }}>
-            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setShowReject(false)}>Cancel</button>
-            <button className="btn btn-danger" style={{ flex: 1 }} onClick={reject} disabled={reviewing || !rejectReason.trim()}>Send back</button>
+        <div className="submit-bar">
+          <div className="submit-bar-inner">
+            <button type="button" className="btn btn-primary" disabled={!!blocker || submitting} onClick={() => { setConfirmChecked(false); setConfirmOpen(true) }}>
+              {resubmit ? 'Resubmit week' : 'Submit week'}
+            </button>
+            <div className="submit-bar-note">{blocker || goesTo}</div>
           </div>
         </div>
       )}
 
-      <div style={{ textAlign: 'center', marginTop: 20 }}>
-        <Link to="/history" style={{ color: 'var(--accent)', fontWeight: 600, fontSize: 14 }}>Previous weeks →</Link>
-      </div>
+      {confirmOpen && (
+        <Sheet title={resubmit ? 'Resubmit week' : 'Submit week'} subtitle={`Week ${week.week_number}, ${fmtH(total)} h`} onClose={() => setConfirmOpen(false)}>
+          <label className="confirm">
+            <input type="checkbox" checked={confirmChecked} onChange={e => setConfirmChecked(e.target.checked)} />
+            <span>{confirmText}</span>
+          </label>
+          <button type="button" className="btn btn-primary sheet-save" style={{ marginTop: 4 }} disabled={!confirmChecked || submitting} onClick={submit}>
+            {submitting ? 'Submitting…' : resubmit ? 'Resubmit week' : 'Submit week'}
+          </button>
+          <p className="help" style={{ textAlign: 'center' }}>{goesTo}</p>
+        </Sheet>
+      )}
+      {sheets}
     </div>
   )
 }

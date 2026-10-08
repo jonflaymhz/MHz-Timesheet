@@ -8,6 +8,7 @@ const { verifyPin, isValidPin } = require('../services/pin');
 const { createSession, revokeSession, revokeAllSessionsForUser } = require('../services/session');
 const { requireAuth, COOKIE_NAME } = require('../middleware/auth');
 const { requireKioskDevice } = require('../services/kioskDevice');
+const { standardDayFor } = require('../services/workPattern');
 
 const router = express.Router();
 
@@ -23,24 +24,6 @@ const COOKIE_OPTS = { httpOnly: true, sameSite: 'lax' };
 function setSessionCookie(req, res, token, expiresAt) {
   res.cookie(COOKIE_NAME, token, { ...COOKIE_OPTS, secure: req.secure, expires: expiresAt });
 }
-
-// ── GET /api/auth/kiosk-users ─────────────────────────────────
-// Name-tile list for the shared factory terminal (Section 3). Tapping a
-// tile only identifies who's about to log in — it never authenticates by
-// itself. A PIN is always required next (confirmed policy). Elevated-tier
-// accounts (Section 3.1) are excluded even if they hold a pin_hash — a
-// shared kiosk has no password/TOTP fields to fall back to.
-// Registered kiosk devices only (Security Fixes v1.1 A3), and no usernames:
-// a tile logs in by user id.
-router.get('/kiosk-users', requireKioskDevice, async (req, res) => {
-  const result = await db.query(
-    `SELECT id, full_name, short_name, kiosk_group FROM users
-      WHERE is_active = TRUE AND pin_hash IS NOT NULL AND pin_locked_at IS NULL
-        AND NOT can_approve AND NOT is_payroll_admin AND NOT is_system_admin
-      ORDER BY short_name`
-  );
-  res.json(result.rows);
-});
 
 // One login page for everyone (Admin Scope Section 3.1) — the account's
 // capabilities decide the credential tier, not a URL the user has to find.
@@ -68,11 +51,11 @@ router.post('/login-tier', async (req, res) => {
 });
 
 // ── POST /api/auth/login ──────────────────────────────────────
-// Standard tier: username + 6-digit PIN. Works identically whether it's a
-// personal device or (with is_kiosk) the shared terminal after a tile tap —
-// the PIN check is exactly the same either way. Only from a registered
-// device (Security Fixes v1.1 A3), so nobody elsewhere can guess PINs and
-// lock people out. A kiosk tile sends user_id; a typed login sends username.
+// Standard tier: username + 6-digit PIN. Only from a registered device
+// (Security Fixes v1.1 A3), so nobody elsewhere can guess PINs and lock
+// people out. The kiosk name-tile sign-in that sent user_id is gone
+// (Employee UI Redesign v1.0 §8); user_id is still accepted so an old
+// cached page doesn't break.
 router.post('/login', requireKioskDevice, async (req, res) => {
   const { username, user_id, pin, is_kiosk } = req.body;
   if ((!username && !user_id) || !isValidPin(pin)) {
@@ -246,7 +229,7 @@ router.post('/logout', requireAuth, async (req, res) => {
 });
 
 router.get('/me', requireAuth, async (req, res) => {
-  res.json({ ...req.user, mfa_enrollment_required: req.pendingMfaEnrollment });
+  res.json({ ...req.user, standard_day_hours: standardDayFor(req.user), mfa_enrollment_required: req.pendingMfaEnrollment });
 });
 
 module.exports = router;

@@ -1,53 +1,51 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { api, getKioskToken } from '../lib/api.js'
+import { api } from '../lib/api.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 import { useAutofocusOnVisible } from '../hooks/useAutofocusOnVisible.js'
-import { groupForKiosk } from '../lib/kioskGroups.js'
+import { Backspace } from '../components/Icons.jsx'
+import { firstName } from '../lib/week.js'
 
-// One login page for everyone (Admin Scope Section 3.1) — no separate
-// admin/Jonny front door to find. Username is entered first; the account's
-// tier (looked up via /auth/login-tier, which never reveals whether a
-// username exists — unknown usernames get the same 'standard' answer as
-// any real non-elevated account) decides whether a PIN field or a
-// password+authenticator pair appears next. Kiosk mode skips the lookup
-// entirely — the tile list only ever contains standard-tier accounts.
+// Remembers who last signed in with a PIN on this phone, so next time it
+// opens on "Welcome back" and the keypad. Only a username and first name.
+const LAST_USER_KEY = 'mhz_ts_last_user'
+function readLastUser() {
+  try { const v = JSON.parse(localStorage.getItem(LAST_USER_KEY) || 'null'); return v?.username ? v : null } catch { return null }
+}
+function writeLastUser(v) {
+  try { if (v) localStorage.setItem(LAST_USER_KEY, JSON.stringify(v)); else localStorage.removeItem(LAST_USER_KEY) } catch { /* private mode */ }
+}
+
+const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'del']
+
+// One sign-in page for everyone (Admin Scope §3.1). PIN accounts get the
+// keypad (Employee UI Redesign v1.0 §7); Approval/Admin accounts keep
+// password + authenticator. The kiosk name-tile sign-in is gone (§8).
 export default function LoginPage() {
   const { refresh } = useAuth()
   const navigate = useNavigate()
-  // A browser registered as a kiosk (Admin > Kiosk devices) opens on the tiles.
-  const isKioskDevice = !!getKioskToken()
-  const [kioskMode, setKioskMode] = useState(isKioskDevice)
-  const [kioskUsers, setKioskUsers] = useState([])
-  const [kioskError, setKioskError] = useState('')
-  const [selectedUserId, setSelectedUserId] = useState('')
-  const [selectedName, setSelectedName] = useState('')
-
-  const [username, setUsername] = useState('')
-  const [tier, setTier] = useState(null) // null (not yet looked up) | 'standard' | 'elevated'
+  const remembered = useRef(readLastUser()).current
+  const [lastUser, setLastUser] = useState(remembered)
+  const [step, setStep] = useState(remembered ? 'pin' : 'username') // 'username' | 'pin' | 'elevated'
+  const [username, setUsername] = useState(remembered?.username || '')
   const [pin, setPin] = useState('')
   const [password, setPassword] = useState('')
   const [totpCode, setTotpCode] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const usernameRef = useRef(null)
-  const pinRef = useRef(null)
   const passwordRef = useRef(null)
 
-  useEffect(() => {
-    if (kioskMode) {
-      setKioskError('')
-      api.get('/auth/kiosk-users').then(setKioskUsers).catch(e => { setKioskUsers([]); setKioskError(e.message) })
-    }
-  }, [kioskMode])
+  useAutofocusOnVisible(usernameRef, step === 'username')
+  useAutofocusOnVisible(passwordRef, step === 'elevated')
 
   async function continueFromUsername(e) {
     e.preventDefault()
-    if (!username) return
+    if (!username.trim()) return
     setError(''); setLoading(true)
     try {
       const result = await api.post('/auth/login-tier', { username })
-      setTier(result.tier)
+      setStep(result.tier === 'elevated' ? 'elevated' : 'pin')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -55,35 +53,53 @@ export default function LoginPage() {
     }
   }
 
-  function backToUsername() {
-    setTier(null)
-    setPin(''); setPassword(''); setTotpCode('')
+  function signInAsSomeoneElse() {
+    writeLastUser(null)
+    setLastUser(null)
+    setUsername(''); setPin(''); setPassword(''); setTotpCode('')
     setError('')
+    setStep('username')
   }
 
-  async function submitStandard(e) {
-    e.preventDefault()
+  async function submitPin(code) {
     setError(''); setLoading(true)
     try {
-      await api.post('/auth/login', {
-        ...(kioskMode ? { user_id: selectedUserId } : { username }),
-        pin,
-        is_kiosk: kioskMode,
-      })
+      const result = await api.post('/auth/login', { username, pin: code })
+      writeLastUser({ username: username.trim().toLowerCase(), first_name: firstName(result.full_name) })
       await refresh()
       navigate('/')
     } catch (err) {
-      setError(err.message)
+      if (err.body?.tier === 'elevated') { setStep('elevated'); setError('') }
+      else {
+        const left = err.body?.attempts_remaining
+        setError(left ? `${err.message}. ${left} ${left === 1 ? 'try' : 'tries'} left.` : err.message)
+      }
       setPin('')
     } finally {
       setLoading(false)
     }
   }
 
-  const showCredentialStepForFocus = kioskMode ? !!selectedUserId : tier !== null
-  useAutofocusOnVisible(usernameRef, !kioskMode && !showCredentialStepForFocus)
-  useAutofocusOnVisible(pinRef, showCredentialStepForFocus && (kioskMode || tier === 'standard'))
-  useAutofocusOnVisible(passwordRef, !kioskMode && showCredentialStepForFocus && tier === 'elevated')
+  const press = useCallback((k) => {
+    if (loading) return
+    if (k === 'del') { setPin(pin.slice(0, -1)); return }
+    if (pin.length >= 6) return
+    const next = pin + k
+    setPin(next)
+    if (next.length === 6) submitPin(next)
+  }, [loading, pin]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Typing on a keyboard works too.
+  useEffect(() => {
+    if (step !== 'pin') return
+    const onKey = (e) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      if (/^[0-9]$/.test(e.key)) { e.preventDefault(); press(e.key) }
+      else if (e.key === 'Backspace') { e.preventDefault(); press('del') }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [step, press])
 
   async function submitElevated(e) {
     e.preventDefault()
@@ -99,118 +115,76 @@ export default function LoginPage() {
     }
   }
 
-  if (kioskMode && !selectedUserId) {
+  const logo = <div className="signin-logo"><img src="/mhz_logo.svg" alt="MHz" /><span>Timesheet</span></div>
+
+  if (step === 'pin') {
+    const greet = lastUser?.username === username.trim().toLowerCase() && lastUser.first_name
     return (
-      <div className="page" style={{ paddingTop: 40 }}>
-        <h1 style={{ textAlign: 'center', marginBottom: 6 }}>Who's this?</h1>
-        <p style={{ textAlign: 'center', color: 'var(--text2)', marginBottom: 24 }}>Tap your name, then enter your PIN</p>
-        {kioskError && <div className="banner banner-error" style={{ maxWidth: 480, margin: '0 auto 16px' }}>{kioskError}</div>}
-        <div className="kiosk-groups">
-          {groupForKiosk(kioskUsers).map(({ group, people }) => (
-            <div key={group} className="kiosk-group">
-              <div className="kiosk-group-title">{group}</div>
-              {people.map(u => (
-                <button key={u.id} className="name-tile" onClick={() => { setSelectedUserId(u.id); setSelectedName(u.full_name) }}>
-                  <div className="name-tile-avatar">{(u.short_name || u.full_name).charAt(0)}</div>
-                  {u.short_name || u.full_name}
-                </button>
-              ))}
-            </div>
-          ))}
+      <main className="signin">
+        {logo}
+        <h1>{greet ? `Welcome back, ${greet}` : 'Welcome'}</h1>
+        <p className="signin-sub">{greet ? 'Enter your 6-digit PIN' : `Enter the 6-digit PIN for ${username.trim()}`}</p>
+        <div className="pin-dots" role="img" aria-label={`${pin.length} of 6 digits entered`}>
+          {Array.from({ length: 6 }, (_, i) => <span key={i} className={i < pin.length ? 'on' : ''} />)}
         </div>
-        <div style={{ textAlign: 'center', marginTop: 24 }}>
-          <button className="btn btn-ghost btn-sm" onClick={() => setKioskMode(false)}>Use my own device instead</button>
+        <div aria-live="assertive" style={{ minHeight: 44, textAlign: 'center' }}>
+          {loading ? <span style={{ color: 'var(--muted)' }}>Signing in…</span> : error && <div className="banner banner-error" style={{ margin: '6px 0 0' }}>{error}</div>}
         </div>
-      </div>
+        <div className="keypad">
+          {KEYS.map((k, i) => k === ''
+            ? <span key={i} className="blank" aria-hidden="true" />
+            : k === 'del'
+              ? <button key={i} type="button" aria-label="Delete" onClick={() => press('del')} disabled={loading || !pin.length}><Backspace /></button>
+              : <button key={i} type="button" onClick={() => press(k)} disabled={loading}>{k}</button>
+          )}
+        </div>
+        <div className="signin-links">
+          <button type="button" className="btn-link" onClick={signInAsSomeoneElse}>Not you? Sign in as someone else</button>
+          <span>Forgotten PIN? Ask the office</span>
+        </div>
+      </main>
     )
   }
 
-  // Kiosk mode always goes straight to the PIN step — tile selection already
-  // identified a standard-tier account.
-  const showCredentialStep = kioskMode ? !!selectedUserId : tier !== null
-
   return (
-    <div className="page" style={{ paddingTop: 60, maxWidth: 380 }}>
-      <h1 style={{ textAlign: 'center', marginBottom: 30 }}>MHz Timesheets</h1>
-      {kioskMode && selectedUserId && (
-        <div style={{ textAlign: 'center', marginBottom: 20 }}>
-          <div className="name-tile-avatar" style={{ margin: '0 auto 10px' }}>{selectedName.charAt(0)}</div>
-          <div style={{ fontWeight: 700, fontSize: 17 }}>{selectedName}</div>
-          <button className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => setSelectedUserId('')}>Not you?</button>
-        </div>
-      )}
+    <main className="signin">
+      {logo}
+      <h1>Sign in</h1>
+      {error && <div className="banner banner-error" role="alert" style={{ marginTop: 18 }}>{error}</div>}
 
-      {error && <div className="banner banner-error">{error}</div>}
-
-      {!kioskMode && !showCredentialStep && (
-        <form onSubmit={continueFromUsername}>
+      {step === 'username' && (
+        <form onSubmit={continueFromUsername} style={{ marginTop: 20 }}>
+          <label className="field-label" htmlFor="username" style={{ marginTop: 0 }}>Username</label>
           <input
-            ref={usernameRef}
-            className="input" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)}
-            style={{ marginBottom: 16 }} autoFocus
-            autoCapitalize="none" autoCorrect="off" spellCheck="false"
+            id="username" ref={usernameRef} className="input" value={username} onChange={e => setUsername(e.target.value)}
+            autoFocus autoCapitalize="none" autoCorrect="off" spellCheck="false" autoComplete="username"
           />
-          <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading || !username}>
+          <button className="btn btn-primary" style={{ width: '100%', marginTop: 16 }} disabled={loading || !username.trim()}>
             {loading ? 'Checking…' : 'Continue'}
           </button>
+          <div className="signin-links"><span>Forgotten your username? Ask the office</span></div>
         </form>
       )}
 
-      {kioskMode && showCredentialStep && (
-        <form onSubmit={submitStandard}>
+      {step === 'elevated' && (
+        <form onSubmit={submitElevated} style={{ marginTop: 20 }}>
+          <p className="signin-sub" style={{ marginBottom: 10 }}>{username.trim()}</p>
+          <label className="field-label" htmlFor="password" style={{ marginTop: 0 }}>Password</label>
+          <input id="password" ref={passwordRef} className="input" type="password" value={password} onChange={e => setPassword(e.target.value)} autoFocus autoComplete="current-password" />
+          <label className="field-label" htmlFor="totp">Authenticator code</label>
           <input
-            ref={pinRef}
-            className="input" type="tel" inputMode="numeric" maxLength={6} placeholder="6-digit PIN"
-            value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
-            style={{ marginBottom: 16, textAlign: 'center', fontSize: 24, letterSpacing: 6 }}
-            autoFocus
-          />
-          <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading || pin.length !== 6}>
-            {loading ? 'Signing in…' : 'Sign in'}
-          </button>
-        </form>
-      )}
-
-      {!kioskMode && showCredentialStep && tier === 'standard' && (
-        <form onSubmit={submitStandard}>
-          <div style={{ textAlign: 'center', marginBottom: 16, fontSize: 13, color: 'var(--text2)' }}>
-            {username} · <button type="button" className="btn btn-ghost btn-sm" style={{ display: 'inline', padding: 0 }} onClick={backToUsername}>not you?</button>
-          </div>
-          <input
-            ref={pinRef}
-            className="input" type="tel" inputMode="numeric" maxLength={6} placeholder="6-digit PIN"
-            value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
-            style={{ marginBottom: 16, textAlign: 'center', fontSize: 24, letterSpacing: 6 }}
-            autoFocus
-          />
-          <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading || pin.length !== 6}>
-            {loading ? 'Signing in…' : 'Sign in'}
-          </button>
-        </form>
-      )}
-
-      {!kioskMode && showCredentialStep && tier === 'elevated' && (
-        <form onSubmit={submitElevated}>
-          <div style={{ textAlign: 'center', marginBottom: 16, fontSize: 13, color: 'var(--text2)' }}>
-            {username} · <button type="button" className="btn btn-ghost btn-sm" style={{ display: 'inline', padding: 0 }} onClick={backToUsername}>not you?</button>
-          </div>
-          <input ref={passwordRef} className="input" type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} style={{ marginBottom: 12 }} autoFocus />
-          <input
-            className="input" inputMode="numeric" maxLength={6} placeholder="Authenticator code"
+            id="totp" className="input mono" inputMode="numeric" maxLength={6} autoComplete="one-time-code"
             value={totpCode} onChange={e => setTotpCode(e.target.value.replace(/\D/g, ''))}
-            style={{ marginBottom: 16, textAlign: 'center', fontSize: 20, letterSpacing: 4 }}
+            style={{ textAlign: 'center', fontSize: 20, letterSpacing: 4 }}
           />
-          <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading}>
+          <button className="btn btn-primary" style={{ width: '100%', marginTop: 16 }} disabled={loading}>
             {loading ? 'Signing in…' : 'Sign in'}
           </button>
+          <div className="signin-links">
+            <button type="button" className="btn-link" onClick={signInAsSomeoneElse}>Not you? Sign in as someone else</button>
+          </div>
         </form>
       )}
-
-      {!kioskMode && !showCredentialStep && (
-        <div style={{ textAlign: 'center', marginTop: 20 }}>
-          <button className="btn btn-ghost btn-sm" onClick={() => setKioskMode(true)}>Use shared factory kiosk instead</button>
-        </div>
-      )}
-    </div>
+    </main>
   )
 }

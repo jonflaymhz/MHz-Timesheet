@@ -1,80 +1,81 @@
-import { useState } from 'react'
-import { api } from '../lib/api.js'
-import EntryModal from './EntryModal.jsx'
+import { weekdayName, fmtShort } from '../lib/dates.js'
+import { fmtH, lineKey, entryTitle, entrySubtitle } from '../lib/week.js'
+import { Check, ChevronDown, Plus } from './Icons.jsx'
 
-function fmtHours(h) {
-  return Number(h) % 1 === 0 ? String(Number(h)) : Number(h).toFixed(2).replace(/0$/, '')
+const STATE_WORDS = { complete: 'Complete', short: 'Short', missing: 'Needs hours', weekend: 'Weekend', off: 'Not working' }
+
+function Badge({ state }) {
+  const glyph = state === 'complete' ? <Check /> : state === 'short' || state === 'missing' ? '!' : '–'
+  return (
+    <span className={`badge badge-${state}`}>
+      <span aria-hidden="true" style={{ display: 'inline-flex' }}>{glyph}</span>
+      <span className="sr-only">{STATE_WORDS[state]}</span>
+    </span>
+  )
 }
 
-// Whole week always visible, running total per day (Section 6) — this is
-// one day of that week.
-export default function DayCard({ date, label, entries, weekId, department, deptCode, hasCtpAccess, editable, weekOwnerId, onRefresh }) {
-  const [showAdd, setShowAdd] = useState(false)
-  const total = entries.reduce((sum, e) => sum + Number(e.hours), 0)
-  const marker = entries.find(e => e.is_non_work_marker)
-
-  async function deleteEntry(id) {
-    await api.delete(`/weeks/${weekId}/entries/${id}`)
-    onRefresh()
-  }
-
-  async function toggleMarker() {
-    if (marker) {
-      await deleteEntry(marker.id)
-    } else {
-      await api.post(`/weeks/${weekId}/entries`, { entry_date: date, is_non_work_marker: true })
-      onRefresh()
-    }
-  }
-
+// One day of the phone week (Employee UI Redesign v1.0 §2): tap to open,
+// entries inside, Add time plus Not working (empty day) or Absence (short
+// day). Read-only weeks open to show entries with no actions.
+export default function DayCard({ day, open, onToggle, editable, colours, weekOwnerId, onAdd, onEdit, onAbsence, onRemoveMarker }) {
+  const { date, state, note, total, work, marker } = day
+  const bodyId = `day-body-${date}`
   return (
-    <div className="card" style={{ padding: 16, marginBottom: 12 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: entries.length ? 10 : 0 }}>
-        <div>
-          <div style={{ fontWeight: 700, fontSize: 15 }}>{label}</div>
-        </div>
-        <div style={{ fontWeight: 700, color: total > 0 ? 'var(--accent)' : 'var(--text3)', fontSize: 16 }}>
-          {total > 0 ? `${fmtHours(total)} hrs` : marker ? 'No work' : '—'}
-        </div>
-      </div>
+    <section className={`day${open ? ' open' : ''}`} id={`day-${date}`} aria-label={`${weekdayName(date)} ${fmtShort(date)}`}>
+      <button type="button" className="day-head" aria-expanded={open} aria-controls={bodyId} onClick={onToggle}>
+        <Badge state={state} />
+        <span style={{ minWidth: 0 }}>
+          <span className="day-title" style={{ display: 'block' }}>{weekdayName(date)} {fmtShort(date)}</span>
+          <span className={`day-note ${state === 'short' ? 'short' : state === 'missing' ? 'missing' : ''}`} style={{ display: 'block' }}>{note}</span>
+        </span>
+        <span className={`day-total${total > 0 ? '' : ' zero'}`}>{fmtH(total)} h</span>
+        <ChevronDown className="chev" />
+      </button>
 
-      {entries.filter(e => !e.is_non_work_marker).map(e => (
-        <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderTop: '1px solid var(--border)' }}>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontWeight: 500, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {e.project_name || e.reason_name || (e.ctp_build_name
-                ? `${e.ctp_build_sku || e.ctp_build_name} / ${e.ctp_build_order_ref}${e.ctp_build_customer ? ' / ' + e.ctp_build_customer : ''} · ${e.ctp_category_name}`
-                : e.ctp_category_name)}
+      {open && (
+        <div className="day-body" id={bodyId}>
+          {work.map(e => {
+            const proxy = weekOwnerId && e.entered_by !== weekOwnerId
+            const inner = (
+              <>
+                <span className="dot" style={{ background: colours.get(lineKey(e)) }} />
+                <span className="entry-main">
+                  <span className="entry-name" style={{ display: 'block' }}>{entryTitle(e)}</span>
+                  <span className="entry-sub" style={{ display: 'block' }}>
+                    {entrySubtitle(e)}
+                    {proxy && <span style={{ color: 'var(--warn-text)', fontWeight: 600 }}> · entered by {e.entered_by_name || 'supervisor'}</span>}
+                  </span>
+                </span>
+                <span className="entry-hours">{fmtH(e.hours)} h</span>
+              </>
+            )
+            return editable
+              ? <button key={e.id} type="button" className="entry" onClick={() => onEdit(e)} aria-label={`Edit ${entryTitle(e)}, ${fmtH(e.hours)} hours`}>{inner}</button>
+              : <div key={e.id} className="entry">{inner}</div>
+          })}
+          {marker && (
+            <div className="entry">
+              <span className="dot" style={{ background: 'var(--dot-abs)' }} />
+              <span className="entry-main">
+                <span className="entry-name" style={{ display: 'block' }}>{entryTitle(marker)}</span>
+                {marker.description && <span className="entry-sub" style={{ display: 'block' }}>{marker.description}</span>}
+              </span>
+              {editable
+                ? <button type="button" className="btn-link" onClick={() => onRemoveMarker(marker)}>Remove</button>
+                : <span className="entry-hours">0 h</span>}
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text3)' }}>{e.cost_code || 'CTP'}
-              {weekOwnerId && e.entered_by !== weekOwnerId && <span style={{ color: 'var(--amber)', fontWeight: 600 }}> · proxy{e.entered_by_name ? ` (${e.entered_by_name})` : ''}</span>}
-            </div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-            <span style={{ fontWeight: 600 }}>{fmtHours(e.hours)} hrs</span>
-            {editable && <button className="btn btn-ghost btn-sm" onClick={() => deleteEntry(e.id)}>✕</button>}
-          </div>
-        </div>
-      ))}
+          )}
+          {!work.length && !marker && !editable && <div className="entry" style={{ color: 'var(--muted)' }}>Nothing booked.</div>}
 
-      {editable && (
-        <div style={{ display: 'flex', gap: 8, marginTop: entries.length ? 12 : 0 }}>
-          <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={() => setShowAdd(true)}>+ Add time</button>
-          {!entries.some(e => !e.is_non_work_marker) && (
-            <button className="btn btn-ghost btn-sm" onClick={toggleMarker}>
-              {marker ? 'Undo "no work"' : 'No work today'}
-            </button>
+          {editable && (
+            <div className="day-actions">
+              <button type="button" className="btn btn-ghost btn-sm" onClick={onAdd}><Plus width={18} height={18} />Add time</button>
+              {state === 'missing' && <button type="button" className="btn btn-ghost btn-sm" onClick={() => onAbsence(0)}>Not working</button>}
+              {state === 'short' && <button type="button" className="btn btn-ghost btn-sm" onClick={() => onAbsence(day.shortBy)}>Absence</button>}
+            </div>
           )}
         </div>
       )}
-
-      {showAdd && (
-        <EntryModal
-          weekId={weekId} date={date} department={department} deptCode={deptCode} hasCtpAccess={hasCtpAccess}
-          onClose={() => setShowAdd(false)}
-          onSaved={onRefresh}
-        />
-      )}
-    </div>
+    </section>
   )
 }

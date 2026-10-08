@@ -4,6 +4,7 @@ const { requireAuth } = require('../middleware/auth');
 const wu = require('../services/weekUtils');
 const { approvalDecision, canActFor, snapshotRatesAtApproval } = require('../services/approval');
 const { allowedOnProject, allowedOnReason } = require('../services/codeRules');
+const { standardDayFor } = require('../services/workPattern');
 
 const router = express.Router();
 
@@ -29,9 +30,13 @@ async function weekWithEntries(weekId) {
   const [weekResult, entriesResult] = await Promise.all([
     db.query(
       `SELECT tw.*, u.full_name AS owner_full_name, u.department AS owner_department, u.dept_code AS owner_dept_code,
-              u.has_ctp_access AS owner_has_ctp_access
+              u.has_ctp_access AS owner_has_ctp_access, u.closing_leave_date AS owner_leave_date,
+              rb.full_name AS rejected_by_name, ab.full_name AS approved_by_name
          FROM timesheet_week tw
-         JOIN users u ON u.id = tw.user_id WHERE tw.id = $1`,
+         JOIN users u ON u.id = tw.user_id
+         LEFT JOIN users rb ON rb.id = tw.rejected_by
+         LEFT JOIN users ab ON ab.id = tw.approved_by
+        WHERE tw.id = $1`,
       [weekId]
     ),
     db.query(
@@ -51,7 +56,11 @@ async function weekWithEntries(weekId) {
       [weekId]
     ),
   ]);
-  return { week: weekResult.rows[0], entries: entriesResult.rows };
+  const week = weekResult.rows[0];
+  // Employee UI Redesign v1.0 §6: the week owner's standard day, for the
+  // short-day warning (the owner's, not the viewer's, on a proxy view).
+  if (week) week.standard_day_hours = standardDayFor({ id: week.user_id });
+  return { week, entries: entriesResult.rows };
 }
 
 // Auto-applies a Bank Holiday entry for each bank_holiday date that falls
@@ -222,12 +231,14 @@ router.post('/:id/entries', requireAuth, async (req, res) => {
   }
   const isFuture = entry_date > wu.londonToday();
 
+  // A marker may carry a note: the "Other" not-working reason (Employee UI
+  // Redesign v1.0 §4) is a zero-hour day explained in the note.
   if (is_non_work_marker) {
     try {
       const result = await db.query(
-        `INSERT INTO timesheet_entry (week_id, entry_date, is_non_work_marker, hours, entered_by)
-         VALUES ($1, $2, TRUE, 0, $3) RETURNING *`,
-        [week.id, entry_date, req.user.id]
+        `INSERT INTO timesheet_entry (week_id, entry_date, is_non_work_marker, hours, description, entered_by)
+         VALUES ($1, $2, TRUE, 0, $3, $4) RETURNING *`,
+        [week.id, entry_date, description?.trim() || null, req.user.id]
       );
       return res.status(201).json(result.rows[0]);
     } catch (err) {
